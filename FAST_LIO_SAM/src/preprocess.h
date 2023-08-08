@@ -56,7 +56,7 @@ namespace rslidar_ros {
     struct EIGEN_ALIGN16 Point {
         PCL_ADD_POINT4D;
         float intensity;
-        float time;
+        double timestamp;
         uint16_t ring;
         EIGEN_MAKE_ALIGNED_OPERATOR_NEW
     };
@@ -65,8 +65,8 @@ POINT_CLOUD_REGISTER_POINT_STRUCT(rslidar_ros::Point,
                                   (float, x, x)
                                   (float, y, y)
                                   (float, z, z)
-                                  (float, intensity, curvature)
-                                  (float, time, normal_x)
+                                  (float, intensity, intensity)
+                                  (double, timestamp, timestamp)
                                   (uint16_t, ring, ring)
 )
 

@@ -1,7 +1,8 @@
 cmake_minimum_required(VERSION 2.8.3)
 project(fast_lio_sam)
 
-SET(CMAKE_BUILD_TYPE "Debug")  
+# SET(CMAKE_BUILD_TYPE "Debug")  
+SET(CMAKE_BUILD_TYPE "Release") 
 
 ADD_COMPILE_OPTIONS(-std=c++14 )
 ADD_COMPILE_OPTIONS(-std=c++14 )
@@ -111,3 +112,6 @@ add_library(preprocess  src/preprocess.cpp)
 add_executable(fastlio_sam_mapping src/laserMapping.cpp)
 target_link_libraries(fastlio_sam_mapping ${catkin_LIBRARIES} ${PCL_LIBRARIES} ${PYTHON_LIBRARIES}  ${GeographicLib_LIBRARIES} ikd_Tree preprocess gtsam) 
 target_include_directories(fastlio_sam_mapping PRIVATE ${PYTHON_INCLUDE_DIRS})
+
+add_executable(fix_odom_sam src/fix_odom.cpp)
+target_link_libraries(fix_odom_sam ${catkin_LIBRARIES})
