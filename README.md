@@ -36,6 +36,30 @@
 - Eigen >= 3.3.4 (default for Ubuntu 18.04)
 - GTSAM >= 4.0.0(tested on 4.0.0-alpha2)
 
+### Install GTSAM
+
+for ubuntu:
+Add PPA for the latest GTSAM 4.x stable release
+
+```bash
+# Add PPA
+sudo add-apt-repository ppa:borglab/gtsam-release-4.0
+sudo apt update  # not necessary since Bionic
+# Install:
+sudo apt install libgtsam-dev libgtsam-unstable-dev
+```
+
+### Install Geographic
+
+```bash
+git clone https://ghproxy.com/https://github.com/geographiclib/geographiclib.git
+cd geographiclib
+mkdir build && cd build 
+cmake ..
+make
+sudo make install
+```
+
 ## Build
 
 ```shell
