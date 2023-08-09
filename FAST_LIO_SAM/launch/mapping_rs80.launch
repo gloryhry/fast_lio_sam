@@ -26,6 +26,6 @@
     <node launch-prefix="nice" pkg="rviz" type="rviz" name="rviz" args="-d $(find fast_lio_sam)/rviz_cfg/loam_livox.rviz" />
     </group>
 
-    <node pkg="tf" type="static_transform_publisher" name="world_camerainit_broadcaster" args="0.0 0.0 0.0 0.0 0.0 0.0 world camera_init 100" />
+    <!-- <node pkg="tf" type="static_transform_publisher" name="world_camerainit_broadcaster" args="0.0 0.0 0.0 0.0 0.0 0.0 world camera_init 100" /> -->
 
 </launch>
