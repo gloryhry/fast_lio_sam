@@ -5,16 +5,16 @@ Panels:
     Property Tree Widget:
       Expanded:
         - /Global Options1
-        - /mapping1/surround1
         - /mapping1/currPoints1/Autocompute Value Bounds1
         - /Odometry1/Odometry1
         - /Odometry1/Odometry1/Shape1
         - /Odometry1/Odometry1/Covariance1
         - /Odometry1/Odometry1/Covariance1/Position1
         - /Odometry1/Odometry1/Covariance1/Orientation1
+        - /Axes2
         - /loop_clousre1/Namespaces1
-      Splitter Ratio: 0.37519142031669617
-    Tree Height: 520
+      Splitter Ratio: 0.6047903895378113
+    Tree Height: 1804
   - Class: rviz/Selection
     Name: Selection
   - Class: rviz/Tool Properties
@@ -109,7 +109,7 @@ Visualization Manager:
           Color: 255; 255; 255
           Color Transformer: Intensity
           Decay Time: 1000
-          Enabled: true
+          Enabled: false
           Invert Rainbow: true
           Max Color: 255; 255; 255
           Min Color: 0; 0; 0
@@ -124,7 +124,7 @@ Visualization Manager:
           Unreliable: false
           Use Fixed Frame: true
           Use rainbow: true
-          Value: true
+          Value: false
         - Alpha: 1
           Autocompute Intensity Bounds: true
           Autocompute Value Bounds:
@@ -192,7 +192,7 @@ Visualization Manager:
           Topic: /Odometry
           Unreliable: false
           Value: true
-      Enabled: true
+      Enabled: false
       Name: Odometry
     - Alpha: 1
       Class: rviz/Axes
@@ -200,14 +200,14 @@ Visualization Manager:
       Length: 0.699999988079071
       Name: Axes
       Radius: 0.10000000149011612
-      Reference Frame: <Fixed Frame>
+      Reference Frame: rslidar
       Show Trail: false
       Value: true
     - Alpha: 0
       Buffer Length: 2
       Class: rviz/Path
       Color: 25; 255; 255
-      Enabled: true
+      Enabled: false
       Head Diameter: 0
       Head Length: 0
       Length: 0.30000001192092896
@@ -226,7 +226,7 @@ Visualization Manager:
       Shaft Length: 0.4000000059604645
       Topic: /path
       Unreliable: false
-      Value: true
+      Value: false
     - Alpha: 1
       Buffer Length: 1
       Class: rviz/Path
@@ -236,7 +236,7 @@ Visualization Manager:
       Head Length: 0.20000000298023224
       Length: 0.30000001192092896
       Line Style: Billboards
-      Line Width: 0.20000000298023224
+      Line Width: 0.05000000074505806
       Name: Path_isam_update
       Offset:
         X: 0
@@ -255,7 +255,7 @@ Visualization Manager:
       Buffer Length: 1
       Class: rviz/Path
       Color: 138; 226; 52
-      Enabled: true
+      Enabled: false
       Head Diameter: 0.30000001192092896
       Head Length: 0.20000000298023224
       Length: 0.30000001192092896
@@ -274,7 +274,7 @@ Visualization Manager:
       Shaft Length: 0.10000000149011612
       Topic: /gnss_path
       Unreliable: false
-      Value: true
+      Value: false
     - Alpha: 1
       Autocompute Intensity Bounds: false
       Autocompute Value Bounds:
@@ -334,19 +334,104 @@ Visualization Manager:
       Use rainbow: true
       Value: false
     - Class: rviz/MarkerArray
-      Enabled: true
+      Enabled: false
       Marker Topic: /fast_lio_sam/mapping/loop_closure_constraints
       Name: loop_clousre
       Namespaces:
         {}
       Queue Size: 100
+      Value: false
+    - Alpha: 0.699999988079071
+      Class: rviz/Map
+      Color Scheme: map
+      Draw Behind: false
+      Enabled: true
+      Name: Map
+      Topic: /map
+      Unreliable: false
+      Use Timestamp: false
+      Value: true
+    - Class: rviz/TF
+      Enabled: true
+      Filter (blacklist): ""
+      Filter (whitelist): ""
+      Frame Timeout: 15
+      Frames:
+        All Enabled: true
+        base_footprint:
+          Value: true
+        base_link:
+          Value: true
+        body:
+          Value: true
+        camera_init:
+          Value: true
+        front_left_wheel_link:
+          Value: true
+        front_mount:
+          Value: true
+        front_right_wheel_link:
+          Value: true
+        imu:
+          Value: true
+        imu_fixed:
+          Value: true
+        inertial_link:
+          Value: true
+        odom:
+          Value: true
+        rear_left_wheel_link:
+          Value: true
+        rear_mount:
+          Value: true
+        rear_right_wheel_link:
+          Value: true
+        rslidar:
+          Value: true
+        world:
+          Value: true
+      Marker Alpha: 1
+      Marker Scale: 1
+      Name: TF
+      Show Arrows: true
+      Show Axes: true
+      Show Names: true
+      Tree:
+        world:
+          camera_init:
+            body:
+              {}
+          odom:
+            base_footprint:
+              base_link:
+                front_left_wheel_link:
+                  {}
+                front_mount:
+                  {}
+                front_right_wheel_link:
+                  {}
+                imu:
+                  {}
+                imu_fixed:
+                  {}
+                inertial_link:
+                  {}
+                rear_left_wheel_link:
+                  {}
+                rear_mount:
+                  {}
+                rear_right_wheel_link:
+                  {}
+                rslidar:
+                  {}
+      Update Interval: 0
       Value: true
   Enabled: true
   Global Options:
     Background Color: 0; 0; 0
     Default Light: true
     Fixed Frame: world
-    Frame Rate: 10
+    Frame Rate: 30
   Name: root
   Tools:
     - Class: rviz/Interact
@@ -368,34 +453,28 @@ Visualization Manager:
   Value: true
   Views:
     Current:
-      Class: rviz/Orbit
-      Distance: 33.494266510009766
+      Angle: -1.5849988460540771
+      Class: rviz/TopDownOrtho
       Enable Stereo Rendering:
         Stereo Eye Separation: 0.05999999865889549
         Stereo Focal Distance: 1
         Swap Stereo Eyes: false
         Value: false
-      Field of View: 0.7853981852531433
-      Focal Point:
-        X: 0
-        Y: 0
-        Z: 0
-      Focal Shape Fixed Size: false
-      Focal Shape Size: 0.05000000074505806
       Invert Z Axis: false
       Name: Current View
       Near Clip Distance: 0.009999999776482582
-      Pitch: 1.1397967338562012
+      Scale: 164.6965789794922
       Target Frame: base_footprint
-      Yaw: 3.140399694442749
+      X: 1.6098146438598633
+      Y: -0.033556174486875534
     Saved: ~
 Window Geometry:
   Displays:
     collapsed: false
-  Height: 759
+  Height: 2176
   Hide Left Dock: false
-  Hide Right Dock: true
-  QMainWindow State: 000000ff00000000fd00000004000000000000018600000245fc020000000dfb0000001200530065006c0065006300740069006f006e00000001e10000009b0000005c00fffffffb0000001e0054006f006f006c002000500072006f007000650072007400690065007302000001ed0000020c00000185000000a3fb000000120056006900650077007300200054006f006f02000001df000002110000018500000122fb000000200054006f006f006c002000500072006f0070006500720074006900650073003203000002880000011d000002210000017afb000000100044006900730070006c006100790073010000003d00000245000000c900fffffffb0000002000730065006c0065006300740069006f006e00200062007500660066006500720200000138000000aa0000023a00000294fb00000014005700690064006500530074006500720065006f02000000e6000000d2000003ee0000030bfb0000000c004b0069006e0065006300740200000186000001060000030c00000261fb0000000a0049006d0061006700650000000297000001dc0000000000000000fb0000000a0049006d0061006700650000000394000001600000000000000000fb0000000a0049006d00610067006501000002c5000000c70000000000000000fb0000000a0049006d00610067006501000002c5000000c70000000000000000fb0000000a0049006d00610067006501000002c5000000c70000000000000000000000010000015200000245fc0200000003fb0000001e0054006f006f006c002000500072006f00700065007200740069006500730100000041000000780000000000000000fb0000000a00560069006500770073000000003d00000245000000a400fffffffb0000001200530065006c0065006300740069006f006e010000025a000000b200000000000000000000000200000490000000a9fc0100000001fb0000000a00560069006500770073030000004e00000080000002e100000197000000030000056d00000052fc0100000002fb0000000800540069006d006501000000000000056d000003bc00fffffffb0000000800540069006d00650100000000000004500000000000000000000003e10000024500000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730100000000ffffffff0000000000000000
+  Hide Right Dock: false
+  QMainWindow State: 000000ff00000000fd00000004000000000000029a0000077afc020000000dfb0000001200530065006c0065006300740069006f006e00000001e10000009b000000b000fffffffb0000001e0054006f006f006c002000500072006f007000650072007400690065007302000001ed0000020c00000185000000b0fb000000120056006900650077007300200054006f006f02000001df000002110000018500000122fb000000200054006f006f006c002000500072006f0070006500720074006900650073003203000002880000011d000002210000017afb000000100044006900730070006c006100790073010000006e0000077a0000018200fffffffb0000002000730065006c0065006300740069006f006e00200062007500660066006500720200000138000000aa0000023a00000294fb00000014005700690064006500530074006500720065006f02000000e6000000d2000003ee0000030bfb0000000c004b0069006e0065006300740200000186000001060000030c00000261fb0000000a0049006d0061006700650000000297000001dc0000000000000000fb0000000a0049006d0061006700650000000394000001600000000000000000fb0000000a0049006d00610067006501000002c5000000c70000000000000000fb0000000a0049006d00610067006501000002c5000000c70000000000000000fb0000000a0049006d00610067006501000002c5000000c70000000000000000000000010000015f0000077afc0200000003fb0000001e0054006f006f006c002000500072006f00700065007200740069006500730100000041000000780000000000000000fb0000000a00560069006500770073010000006e0000077a0000013200fffffffb0000001200530065006c0065006300740069006f006e010000025a000000b200000000000000000000000200000490000000a9fc0100000001fb0000000a00560069006500770073030000004e00000080000002e1000001970000000300000f700000005efc0100000002fb0000000800540069006d0065010000000000000f70000006dc00fffffffb0000000800540069006d0065010000000000000450000000000000000000000b5f0000077a00000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730100000000ffffffff0000000000000000
   Selection:
     collapsed: false
   Time:
@@ -403,7 +482,7 @@ Window Geometry:
   Tool Properties:
     collapsed: false
   Views:
-    collapsed: true
-  Width: 1389
-  X: 531
-  Y: 119
+    collapsed: false
+  Width: 3952
+  X: 144
+  Y: 54
