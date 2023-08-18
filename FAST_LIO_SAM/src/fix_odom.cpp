@@ -53,8 +53,10 @@ int main(int argc, char **argv)
 
     private_nh.param<std::string>("odom_frame_id", odom_frame_id, "odom");
     private_nh.param<std::string>("lidar_frame_id",lidar_frame_id, "rslidar");
-    private_nh.param<std::string>("slam_odom", slam_topic, "/Odometry");
+    private_nh.param<std::string>("slam_odom", slam_topic, "Odometry");
     private_nh.param<std::string>("world_frame_id", world_frame_id, "world");
+    ROS_INFO_STREAM("odom frame id: " << odom_frame_id);
+    ROS_INFO_STREAM("world frame id: " << world_frame_id);
 
     ros::Subscriber slam_odom_sub = nh.subscribe(slam_topic,10,&callback,ros::TransportHints().tcpNoDelay());
     // ros::spin();

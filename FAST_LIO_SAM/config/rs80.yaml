@@ -1,7 +1,7 @@
 common:
 #RS LiDar
-    lid_topic: "/rslidar_compensated"
-    imu_topic: "/imu/data"
+    lid_topic: "rslidar_compensated"
+    imu_topic: "imu/data"
     time_sync_en: false         # ONLY turn on when external time synchronization is really not possible
     
 preprocess:

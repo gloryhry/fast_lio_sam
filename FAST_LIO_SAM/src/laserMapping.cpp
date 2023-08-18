@@ -312,12 +312,15 @@ bool savePCD;               // 是否保存地图
 string savePCDDirectory;    // 保存路径
 
 
+// 获取ros namespace
+std::string rosNamespace;
+
 /**
  * 更新里程计轨迹
  */
 void updatePath(const PointTypePose &pose_in)
 {
-    string odometryFrame = "camera_init";
+    string odometryFrame = rosNamespace + "camera_init";
     geometry_msgs::PoseStamped pose_stamped;
     pose_stamped.header.stamp = ros::Time().fromSec(pose_in.time);
 
@@ -509,7 +512,7 @@ void getCurPose(state_ikfom cur_state)
 void visualizeLoopClosure()
 {
     ros::Time timeLaserInfoStamp = ros::Time().fromSec(lidar_end_time); //  时间戳
-    string odometryFrame = "camera_init";
+    string odometryFrame = rosNamespace + "camera_init";
 
     if (loopIndexContainer.empty())
         return;
@@ -981,7 +984,7 @@ void loopFindNearKeyframes(pcl::PointCloud<PointType>::Ptr &nearKeyframes, const
 void performLoopClosure()
 {
     ros::Time timeLaserInfoStamp = ros::Time().fromSec(lidar_end_time); //  时间戳
-    string odometryFrame = "camera_init";
+    string odometryFrame = rosNamespace + "camera_init";
 
     if (cloudKeyPoses3D->points.empty() == true)
     {
@@ -1402,7 +1405,7 @@ void gnss_cbk(const sensor_msgs::NavSatFixConstPtr& msg_in)
         gnss_buffer.push_back(gnss_data_enu);
 
         // visial gnss path in rviz:
-        msg_gnss_pose.header.frame_id = "camera_init";
+        msg_gnss_pose.header.frame_id = rosNamespace + "camera_init";
         msg_gnss_pose.header.stamp = ros::Time().fromSec(gnss_data.time);
         // Eigen::Vector3d gnss_pose_ (gnss_data.local_E, gnss_data.local_N, - gnss_data.local_U); 
         // Eigen::Vector3d gnss_pose_ (gnss_data.local_N, gnss_data.local_E, - gnss_data.local_U); 
@@ -1578,7 +1581,7 @@ void publish_frame_world(const ros::Publisher &pubLaserCloudFull)         //    
         sensor_msgs::PointCloud2 laserCloudmsg;
         pcl::toROSMsg(*laserCloudWorld, laserCloudmsg);
         laserCloudmsg.header.stamp = ros::Time().fromSec(lidar_end_time);
-        laserCloudmsg.header.frame_id = "camera_init";
+        laserCloudmsg.header.frame_id = rosNamespace + "camera_init";
         pubLaserCloudFull.publish(laserCloudmsg);
         publish_count -= PUBFRAME_PERIOD;
     }
@@ -1628,7 +1631,7 @@ void publish_frame_body(const ros::Publisher &pubLaserCloudFull_body)          /
     sensor_msgs::PointCloud2 laserCloudmsg;
     pcl::toROSMsg(*laserCloudIMUBody, laserCloudmsg);
     laserCloudmsg.header.stamp = ros::Time().fromSec(lidar_end_time);
-    laserCloudmsg.header.frame_id = "body";
+    laserCloudmsg.header.frame_id = rosNamespace + "body";
     pubLaserCloudFull_body.publish(laserCloudmsg);
     publish_count -= PUBFRAME_PERIOD;
 }
@@ -1645,7 +1648,7 @@ void publish_effect_world(const ros::Publisher &pubLaserCloudEffect)
     sensor_msgs::PointCloud2 laserCloudFullRes3;
     pcl::toROSMsg(*laserCloudWorld, laserCloudFullRes3);
     laserCloudFullRes3.header.stamp = ros::Time().fromSec(lidar_end_time);
-    laserCloudFullRes3.header.frame_id = "camera_init";
+    laserCloudFullRes3.header.frame_id = rosNamespace + "camera_init";
     pubLaserCloudEffect.publish(laserCloudFullRes3);
 }
 
@@ -1654,7 +1657,7 @@ void publish_map(const ros::Publisher &pubLaserCloudMap)
     sensor_msgs::PointCloud2 laserCloudMap;
     pcl::toROSMsg(*featsFromMap, laserCloudMap);
     laserCloudMap.header.stamp = ros::Time().fromSec(lidar_end_time);
-    laserCloudMap.header.frame_id = "camera_init";
+    laserCloudMap.header.frame_id = rosNamespace + "camera_init";
     pubLaserCloudMap.publish(laserCloudMap);
 }
 
@@ -1672,8 +1675,8 @@ void set_posestamp(T &out)
 
 void publish_odometry(const ros::Publisher &pubOdomAftMapped)
 {
-    odomAftMapped.header.frame_id = "camera_init";
-    odomAftMapped.child_frame_id = "body";
+    odomAftMapped.header.frame_id = rosNamespace + "camera_init";
+    odomAftMapped.child_frame_id = rosNamespace + "body";
     odomAftMapped.header.stamp = ros::Time().fromSec(lidar_end_time); // ros::Time().fromSec(lidar_end_time);
     set_posestamp(odomAftMapped.pose);
     pubOdomAftMapped.publish(odomAftMapped);
@@ -1700,14 +1703,14 @@ void publish_odometry(const ros::Publisher &pubOdomAftMapped)
     q.setY(odomAftMapped.pose.pose.orientation.y);
     q.setZ(odomAftMapped.pose.pose.orientation.z);
     transform.setRotation(q);
-    br.sendTransform(tf::StampedTransform(transform, odomAftMapped.header.stamp, "camera_init", "body"));
+    br.sendTransform(tf::StampedTransform(transform, odomAftMapped.header.stamp, rosNamespace + "camera_init", rosNamespace + "body"));
 }
 
 void publish_path(const ros::Publisher pubPath)
 {
     set_posestamp(msg_body_pose);
     msg_body_pose.header.stamp = ros::Time().fromSec(lidar_end_time);
-    msg_body_pose.header.frame_id = "camera_init";
+    msg_body_pose.header.frame_id = rosNamespace + "camera_init";
 
     /*** if path is too large, the rvis will crash ***/
     static int jjj = 0;
@@ -1733,7 +1736,7 @@ void publish_path(const ros::Publisher pubPath)
 void publish_path_update(const ros::Publisher pubPath)
 {
     ros::Time timeLaserInfoStamp = ros::Time().fromSec(lidar_end_time); //  时间戳
-    string odometryFrame = "camera_init";
+    string odometryFrame = rosNamespace + "camera_init";
     if (pubPath.getNumSubscribers() != 0)
     {
         /*** if path is too large, the rvis will crash ***/
@@ -1753,7 +1756,7 @@ void publish_path_update(const ros::Publisher pubPath)
 void publish_gnss_path(const ros::Publisher pubPath)
 {
     gps_path.header.stamp = ros::Time().fromSec(lidar_end_time);
-    gps_path.header.frame_id = "camera_init";
+    gps_path.header.frame_id = rosNamespace + "camera_init";
 
     static int jjj = 0;
     jjj++;
@@ -1909,7 +1912,7 @@ bool saveMapService(fast_lio_sam::save_mapRequest& req, fast_lio_sam::save_mapRe
 
       // visial optimize global map on viz
     ros::Time timeLaserInfoStamp = ros::Time().fromSec(lidar_end_time);
-    string odometryFrame = "camera_init";
+    string odometryFrame = rosNamespace + "camera_init";
     publishCloud(&pubOptimizedGlobalMap, globalSurfCloudDS, timeLaserInfoStamp, odometryFrame);
 
       return true;
@@ -1933,7 +1936,7 @@ void publishGlobalMap()
 {
     /*** if path is too large, the rvis will crash ***/
     ros::Time timeLaserInfoStamp = ros::Time().fromSec(lidar_end_time);
-    string odometryFrame = "camera_init";
+    string odometryFrame = rosNamespace + "camera_init";
     if (pubLaserCloudSurround.getNumSubscribers() == 0)
         return;
 
@@ -2117,8 +2120,12 @@ int main(int argc, char **argv)
     }
 
     ros::init(argc, argv, "laserMapping");
-    ros::NodeHandle nh;
-
+    ros::NodeHandle nh,private_nh("~");
+    
+    nh.param<std::string>("tf_prefix", rosNamespace, "");
+    if(rosNamespace != ""){
+        rosNamespace = rosNamespace + "/";
+    }
     nh.param<bool>("publish/path_en", path_en, true);
     nh.param<bool>("publish/scan_publish_en", scan_pub_en, true);
     nh.param<bool>("publish/dense_publish_en", dense_pub_en, true);
@@ -2178,7 +2185,7 @@ int main(int argc, char **argv)
     nh.param<float>("historyKeyframeFitnessScore", historyKeyframeFitnessScore, 0.3);
 
     // gnss
-    nh.param<string>("common/gnss_topic", gnss_topic,"/gps/fix");
+    nh.param<string>("common/gnss_topic", gnss_topic,"gps/fix");
     nh.param<vector<double>>("mapping/extrinR_Gnss2Lidar", extrinR_Gnss2Lidar, vector<double>());
     nh.param<vector<double>>("mapping/extrinT_Gnss2Lidar", extrinT_Gnss2Lidar, vector<double>());
     nh.param<bool>("useImuHeadingInitialization", useImuHeadingInitialization, false);
@@ -2214,7 +2221,7 @@ int main(int argc, char **argv)
     isam = new gtsam::ISAM2(parameters);
 
     path.header.stamp = ros::Time::now();
-    path.header.frame_id = "camera_init";
+    path.header.frame_id = rosNamespace + "camera_init";
 
     /*** variables definition ***/
     int effect_feat_num = 0, frame_num = 0;
@@ -2268,15 +2275,15 @@ int main(int argc, char **argv)
     /*** ROS subscribe initialization ***/
     ros::Subscriber sub_pcl = p_pre->lidar_type == AVIA ? nh.subscribe(lid_topic, 200000, livox_pcl_cbk) : nh.subscribe(lid_topic, 200000, standard_pcl_cbk);
     ros::Subscriber sub_imu = nh.subscribe(imu_topic, 200000, imu_cbk);
-    ros::Publisher pubLaserCloudFull = nh.advertise<sensor_msgs::PointCloud2>("/cloud_registered", 100000);        //  world系下稠密点云
-    ros::Publisher pubLaserCloudFull_body = nh.advertise<sensor_msgs::PointCloud2>("/cloud_registered_body", 100000);      //  body系下稠密点云
-    ros::Publisher pubLaserCloudEffect = nh.advertise<sensor_msgs::PointCloud2>("/cloud_effected", 100000);         //  no used
-    ros::Publisher pubLaserCloudMap = nh.advertise<sensor_msgs::PointCloud2>("/Laser_map", 100000);                    //  no used
-    ros::Publisher pubOdomAftMapped = nh.advertise<nav_msgs::Odometry>("/Odometry", 100000);
-    ros::Publisher pubPath = nh.advertise<nav_msgs::Path>("/path", 1e00000);
+    ros::Publisher pubLaserCloudFull = nh.advertise<sensor_msgs::PointCloud2>("cloud_registered", 100000);        //  world系下稠密点云
+    ros::Publisher pubLaserCloudFull_body = nh.advertise<sensor_msgs::PointCloud2>("cloud_registered_body", 100000);      //  body系下稠密点云
+    ros::Publisher pubLaserCloudEffect = nh.advertise<sensor_msgs::PointCloud2>("cloud_effected", 100000);         //  no used
+    ros::Publisher pubLaserCloudMap = nh.advertise<sensor_msgs::PointCloud2>("Laser_map", 100000);                    //  no used
+    ros::Publisher pubOdomAftMapped = nh.advertise<nav_msgs::Odometry>("Odometry", 100000);
+    ros::Publisher pubPath = nh.advertise<nav_msgs::Path>("path", 1e00000);
 
     ros::Publisher pubPathUpdate = nh.advertise<nav_msgs::Path>("fast_lio_sam/path_update", 100000);                   //  isam更新后的path
-    pubGnssPath = nh.advertise<nav_msgs::Path>("/gnss_path", 100000);
+    pubGnssPath = nh.advertise<nav_msgs::Path>("gnss_path", 100000);
     pubLaserCloudSurround = nh.advertise<sensor_msgs::PointCloud2>("fast_lio_sam/mapping/keyframe_submap", 1); // 发布局部关键帧map的特征点云
     pubOptimizedGlobalMap = nh.advertise<sensor_msgs::PointCloud2>("fast_lio_sam/mapping/map_global_optimized", 1); // 发布局部关键帧map的特征点云
 
@@ -2286,16 +2293,16 @@ int main(int argc, char **argv)
     // 发布当前关键帧经过闭环优化后的位姿变换之后的特征点云
     pubIcpKeyFrames = nh.advertise<sensor_msgs::PointCloud2>("fast_lio_sam/mapping/icp_loop_closure_corrected_cloud", 1);
     // 发布闭环边，rviz中表现为闭环帧之间的连线
-    pubLoopConstraintEdge = nh.advertise<visualization_msgs::MarkerArray>("/fast_lio_sam/mapping/loop_closure_constraints", 1);
+    pubLoopConstraintEdge = nh.advertise<visualization_msgs::MarkerArray>("fast_lio_sam/mapping/loop_closure_constraints", 1);
 
     // gnss
     ros::Subscriber sub_gnss = nh.subscribe(gnss_topic, 200000, gnss_cbk);
     
     // saveMap  发布地图保存服务
-    srvSaveMap  = nh.advertiseService("/save_map" ,  &saveMapService);
+    srvSaveMap  = nh.advertiseService("save_map" ,  &saveMapService);
 
     // savePose  发布轨迹保存服务
-    srvSavePose  = nh.advertiseService("/save_pose" ,  &savePoseService);
+    srvSavePose  = nh.advertiseService("save_pose" ,  &savePoseService);
 
     // 回环检测线程
     std::thread loopthread(&loopClosureThread);

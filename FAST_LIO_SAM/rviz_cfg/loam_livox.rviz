@@ -11,10 +11,10 @@ Panels:
         - /Odometry1/Odometry1/Covariance1
         - /Odometry1/Odometry1/Covariance1/Position1
         - /Odometry1/Odometry1/Covariance1/Orientation1
-        - /Axes2
         - /loop_clousre1/Namespaces1
+        - /Map1
       Splitter Ratio: 0.6047903895378113
-    Tree Height: 1804
+    Tree Height: 885
   - Class: rviz/Selection
     Name: Selection
   - Class: rviz/Tool Properties
@@ -32,7 +32,7 @@ Panels:
   - Class: rviz/Time
     Name: Time
     SyncMode: 0
-    SyncSource: currPoints
+    SyncSource: ikdtreeMap
 Preferences:
   PromptSaveOnExit: true
 Toolbars:
@@ -92,7 +92,7 @@ Visualization Manager:
           Size (Pixels): 3
           Size (m): 0.05000000074505806
           Style: Points
-          Topic: /cloud_registered
+          Topic: /robot1/cloud_registered
           Unreliable: false
           Use Fixed Frame: true
           Use rainbow: true
@@ -120,7 +120,7 @@ Visualization Manager:
           Size (Pixels): 1
           Size (m): 0.009999999776482582
           Style: Points
-          Topic: /cloud_registered
+          Topic: /robot1/cloud_registered
           Unreliable: false
           Use Fixed Frame: true
           Use rainbow: true
@@ -137,7 +137,7 @@ Visualization Manager:
           Color: 255; 0; 0
           Color Transformer: FlatColor
           Decay Time: 0
-          Enabled: false
+          Enabled: true
           Invert Rainbow: false
           Max Color: 255; 255; 255
           Min Color: 0; 0; 0
@@ -148,11 +148,11 @@ Visualization Manager:
           Size (Pixels): 3
           Size (m): 0.10000000149011612
           Style: Flat Squares
-          Topic: /Laser_map
+          Topic: /robot1/Laser_map
           Unreliable: false
           Use Fixed Frame: true
           Use rainbow: true
-          Value: false
+          Value: true
       Enabled: true
       Name: mapping
     - Class: rviz/Group
@@ -189,10 +189,10 @@ Visualization Manager:
             Shaft Length: 0.05000000074505806
             Shaft Radius: 0.05000000074505806
             Value: Axes
-          Topic: /Odometry
+          Topic: /robot1/Odometry
           Unreliable: false
           Value: true
-      Enabled: false
+      Enabled: true
       Name: Odometry
     - Alpha: 1
       Class: rviz/Axes
@@ -200,7 +200,7 @@ Visualization Manager:
       Length: 0.699999988079071
       Name: Axes
       Radius: 0.10000000149011612
-      Reference Frame: rslidar
+      Reference Frame: robot1/rslidar
       Show Trail: false
       Value: true
     - Alpha: 0
@@ -224,7 +224,7 @@ Visualization Manager:
       Radius: 0.029999999329447746
       Shaft Diameter: 0.4000000059604645
       Shaft Length: 0.4000000059604645
-      Topic: /path
+      Topic: /robot1/path
       Unreliable: false
       Value: false
     - Alpha: 1
@@ -248,7 +248,7 @@ Visualization Manager:
       Radius: 0.029999999329447746
       Shaft Diameter: 0.10000000149011612
       Shaft Length: 0.10000000149011612
-      Topic: /fast_lio_sam/path_update
+      Topic: /robot1/fast_lio_sam/path_update
       Unreliable: false
       Value: true
     - Alpha: 1
@@ -272,7 +272,7 @@ Visualization Manager:
       Radius: 0.029999999329447746
       Shaft Diameter: 0.10000000149011612
       Shaft Length: 0.10000000149011612
-      Topic: /gnss_path
+      Topic: /robot1/gnss_path
       Unreliable: false
       Value: false
     - Alpha: 1
@@ -300,7 +300,7 @@ Visualization Manager:
       Size (Pixels): 4
       Size (m): 0.30000001192092896
       Style: Spheres
-      Topic: /fast_lio_sam/mapping/keyframe_submap
+      Topic: /robot1/fast_lio_sam/mapping/keyframe_submap
       Unreliable: false
       Use Fixed Frame: true
       Use rainbow: true
@@ -328,7 +328,7 @@ Visualization Manager:
       Size (Pixels): 3
       Size (m): 0.10000000149011612
       Style: Flat Squares
-      Topic: /fast_lio_sam/mapping/map_global_optimized
+      Topic: /robot1/fast_lio_sam/mapping/map_global_optimized
       Unreliable: false
       Use Fixed Frame: true
       Use rainbow: true
@@ -347,7 +347,7 @@ Visualization Manager:
       Draw Behind: false
       Enabled: true
       Name: Map
-      Topic: /map
+      Topic: /robot1/map
       Unreliable: false
       Use Timestamp: false
       Value: true
@@ -358,37 +358,37 @@ Visualization Manager:
       Frame Timeout: 15
       Frames:
         All Enabled: true
-        base_footprint:
+        robot1/base_footprint:
           Value: true
-        base_link:
+        robot1/base_link:
           Value: true
-        body:
+        robot1/body:
           Value: true
-        camera_init:
+        robot1/camera_init:
           Value: true
-        front_left_wheel_link:
+        robot1/front_left_wheel_link:
           Value: true
-        front_mount:
+        robot1/front_mount:
           Value: true
-        front_right_wheel_link:
+        robot1/front_right_wheel_link:
           Value: true
-        imu:
+        robot1/imu:
           Value: true
-        imu_fixed:
+        robot1/imu_fixed:
           Value: true
-        inertial_link:
+        robot1/inertial_link:
           Value: true
-        odom:
+        robot1/odom:
           Value: true
-        rear_left_wheel_link:
+        robot1/rear_left_wheel_link:
           Value: true
-        rear_mount:
+        robot1/rear_mount:
           Value: true
-        rear_right_wheel_link:
+        robot1/rear_right_wheel_link:
           Value: true
-        rslidar:
+        robot1/rslidar:
           Value: true
-        world:
+        robot1/world:
           Value: true
       Marker Alpha: 1
       Marker Scale: 1
@@ -397,32 +397,32 @@ Visualization Manager:
       Show Axes: true
       Show Names: true
       Tree:
-        world:
-          camera_init:
-            body:
+        robot1/world:
+          robot1/camera_init:
+            robot1/body:
               {}
-          odom:
-            base_footprint:
-              base_link:
-                front_left_wheel_link:
+          robot1/odom:
+            robot1/base_footprint:
+              robot1/base_link:
+                robot1/front_left_wheel_link:
                   {}
-                front_mount:
+                robot1/front_mount:
                   {}
-                front_right_wheel_link:
+                robot1/front_right_wheel_link:
                   {}
-                imu:
+                robot1/imu:
                   {}
-                imu_fixed:
+                robot1/imu_fixed:
                   {}
-                inertial_link:
+                robot1/inertial_link:
                   {}
-                rear_left_wheel_link:
+                robot1/rear_left_wheel_link:
                   {}
-                rear_mount:
+                robot1/rear_mount:
                   {}
-                rear_right_wheel_link:
+                robot1/rear_right_wheel_link:
                   {}
-                rslidar:
+                robot1/rslidar:
                   {}
       Update Interval: 0
       Value: true
@@ -430,7 +430,7 @@ Visualization Manager:
   Global Options:
     Background Color: 0; 0; 0
     Default Light: true
-    Fixed Frame: world
+    Fixed Frame: robot1/world
     Frame Rate: 30
   Name: root
   Tools:
@@ -453,7 +453,7 @@ Visualization Manager:
   Value: true
   Views:
     Current:
-      Angle: -1.5849988460540771
+      Angle: -1.6999987363815308
       Class: rviz/TopDownOrtho
       Enable Stereo Rendering:
         Stereo Eye Separation: 0.05999999865889549
@@ -463,7 +463,7 @@ Visualization Manager:
       Invert Z Axis: false
       Name: Current View
       Near Clip Distance: 0.009999999776482582
-      Scale: 164.6965789794922
+      Scale: 30.404348373413086
       Target Frame: base_footprint
       X: 1.6098146438598633
       Y: -0.033556174486875534
@@ -471,10 +471,10 @@ Visualization Manager:
 Window Geometry:
   Displays:
     collapsed: false
-  Height: 2176
+  Height: 1136
   Hide Left Dock: false
   Hide Right Dock: false
-  QMainWindow State: 000000ff00000000fd00000004000000000000029a0000077afc020000000dfb0000001200530065006c0065006300740069006f006e00000001e10000009b000000b000fffffffb0000001e0054006f006f006c002000500072006f007000650072007400690065007302000001ed0000020c00000185000000b0fb000000120056006900650077007300200054006f006f02000001df000002110000018500000122fb000000200054006f006f006c002000500072006f0070006500720074006900650073003203000002880000011d000002210000017afb000000100044006900730070006c006100790073010000006e0000077a0000018200fffffffb0000002000730065006c0065006300740069006f006e00200062007500660066006500720200000138000000aa0000023a00000294fb00000014005700690064006500530074006500720065006f02000000e6000000d2000003ee0000030bfb0000000c004b0069006e0065006300740200000186000001060000030c00000261fb0000000a0049006d0061006700650000000297000001dc0000000000000000fb0000000a0049006d0061006700650000000394000001600000000000000000fb0000000a0049006d00610067006501000002c5000000c70000000000000000fb0000000a0049006d00610067006501000002c5000000c70000000000000000fb0000000a0049006d00610067006501000002c5000000c70000000000000000000000010000015f0000077afc0200000003fb0000001e0054006f006f006c002000500072006f00700065007200740069006500730100000041000000780000000000000000fb0000000a00560069006500770073010000006e0000077a0000013200fffffffb0000001200530065006c0065006300740069006f006e010000025a000000b200000000000000000000000200000490000000a9fc0100000001fb0000000a00560069006500770073030000004e00000080000002e1000001970000000300000f700000005efc0100000002fb0000000800540069006d0065010000000000000f70000006dc00fffffffb0000000800540069006d0065010000000000000450000000000000000000000b5f0000077a00000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730100000000ffffffff0000000000000000
+  QMainWindow State: 000000ff00000000fd00000004000000000000029a000003b2fc020000000dfb0000001200530065006c0065006300740069006f006e00000001e10000009b0000005c00fffffffb0000001e0054006f006f006c002000500072006f007000650072007400690065007302000001ed0000020c00000185000000b0fb000000120056006900650077007300200054006f006f02000001df000002110000018500000122fb000000200054006f006f006c002000500072006f0070006500720074006900650073003203000002880000011d000002210000017afb000000100044006900730070006c006100790073010000003d000003b2000000c900fffffffb0000002000730065006c0065006300740069006f006e00200062007500660066006500720200000138000000aa0000023a00000294fb00000014005700690064006500530074006500720065006f02000000e6000000d2000003ee0000030bfb0000000c004b0069006e0065006300740200000186000001060000030c00000261fb0000000a0049006d0061006700650000000297000001dc0000000000000000fb0000000a0049006d0061006700650000000394000001600000000000000000fb0000000a0049006d00610067006501000002c5000000c70000000000000000fb0000000a0049006d00610067006501000002c5000000c70000000000000000fb0000000a0049006d00610067006501000002c5000000c70000000000000000000000010000015f000003b2fc0200000003fb0000001e0054006f006f006c002000500072006f00700065007200740069006500730100000041000000780000000000000000fb0000000a00560069006500770073010000003d000003b2000000a400fffffffb0000001200530065006c0065006300740069006f006e010000025a000000b200000000000000000000000200000490000000a9fc0100000001fb0000000a00560069006500770073030000004e00000080000002e10000019700000003000007380000005efc0100000002fb0000000800540069006d0065010000000000000738000003bc00fffffffb0000000800540069006d0065010000000000000450000000000000000000000333000003b200000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730100000000ffffffff0000000000000000
   Selection:
     collapsed: false
   Time:
@@ -483,6 +483,6 @@ Window Geometry:
     collapsed: false
   Views:
     collapsed: false
-  Width: 3952
-  X: 144
-  Y: 54
+  Width: 1848
+  X: 72
+  Y: 27

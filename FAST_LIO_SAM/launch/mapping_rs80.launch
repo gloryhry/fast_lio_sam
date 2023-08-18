@@ -1,6 +1,6 @@
 <launch>
   <!-- Launch file for velodyne16 VLP-16 LiDAR -->
-
+    <arg name="tf_prefix" default="robot1"/>
     <arg name="rviz" default="true" />
 
     <rosparam command="load" file="$(find fast_lio_sam)/config/rs80.yaml" />
@@ -17,7 +17,10 @@
 
     <group if="1">
         <node name="fix_odom_sam" pkg="fast_lio_sam" type="fix_odom_sam" output="screen">
-            <!-- <param name="slam_odom" type="string" value="/Odometry" /> -->
+          <param name="odom_frame_id" type="string" value="$(arg tf_prefix)/odom" />
+          <param name="lidar_frame_id" type="string" value="$(arg tf_prefix)/rslidar" />
+          <param name="slam_odom" type="string" value="Odometry" />
+          <param name="world_frame_id" type="string" value="$(arg tf_prefix)/world" />
         </node>
     </group>
 	
