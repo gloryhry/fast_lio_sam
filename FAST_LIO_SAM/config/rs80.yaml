@@ -2,6 +2,7 @@ common:
 #RS LiDar
     lid_topic: "rslidar_compensated"
     imu_topic: "imu/data"
+    # gnss_topic: "gnss"
     time_sync_en: false         # ONLY turn on when external time synchronization is really not possible
     
 preprocess:
@@ -62,11 +63,11 @@ historyKeyframeSearchTimeDiff: 30.0           # seconds, key frame that is n sec
 historyKeyframeSearchNum: 20                  # number of hostory key frames will be fused into a submap for loop closure
 historyKeyframeFitnessScore: 0.3              # icp threshold, the smaller the better alignment
 
-# GPS Settings
-useImuHeadingInitialization: false           # if using GPS data, set to "true"
-useGpsElevation: false                      # if GPS elevation is bad, set to "false"
-gpsCovThreshold: 2.0                        # m^2, threshold for using GPS data
-poseCovThreshold: 0 #25.0                      # m^2, threshold for using GPS data  位姿协方差阈值 from isam2
+# # GPS Settings
+# useImuHeadingInitialization: true           # if using GPS data, set to "true"
+# useGpsElevation: false                      # if GPS elevation is bad, set to "false"
+# gpsCovThreshold: 2.0                        # m^2, threshold for using GPS data
+# poseCovThreshold: 25.0 #25.0                      # m^2, threshold for using GPS data  位姿协方差阈值 from isam2
 
 # Visualization
 globalMapVisualizationSearchRadius: 1000.0    # meters, global map visualization radius
