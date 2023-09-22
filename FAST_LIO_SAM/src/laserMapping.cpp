@@ -308,6 +308,7 @@ float globalMapVisualizationLeafSize;
 // saveMap
 ros::ServiceServer srvSaveMap;
 ros::ServiceServer srvSavePose;
+ros::ServiceServer srvPubMap;
 bool savePCD;               // 是否保存地图
 string savePCDDirectory;    // 保存路径
 
@@ -1842,6 +1843,71 @@ bool savePoseService(fast_lio_sam::save_poseRequest& req, fast_lio_sam::save_pos
     return true  ;
 }
 
+// 发布优化后的全局点云地图
+bool pubMapService(fast_lio_sam::save_mapRequest& req, fast_lio_sam::save_mapResponse& res)
+{
+    pcl::PointCloud<PointType>::Ptr globalSurfCloud(new pcl::PointCloud<PointType>());
+    pcl::PointCloud<PointType>::Ptr globalSurfCloudDS(new pcl::PointCloud<PointType>());
+    pcl::PointCloud<PointType>::Ptr globalMapCloud(new pcl::PointCloud<PointType>());
+
+    // 只需要最近的一些关键帧
+    int start_index=0;
+    if((int)cloudKeyPoses6D->size() > 20)
+    {
+        start_index = (int)cloudKeyPoses6D->size() - 20;
+    }
+
+    // 注意：拼接地图时，keyframe是lidar系，而fastlio更新后的存到的cloudKeyPoses6D 关键帧位姿是body系下的，需要把
+    //cloudKeyPoses6D  转换为T_world_lidar 。 T_world_lidar = T_world_body * T_body_lidar , T_body_lidar 是外参
+    for (int i = start_index; i < (int)cloudKeyPoses6D->size(); i++) {
+        //   *globalCornerCloud += *transformPointCloud(cornerCloudKeyFrames[i],  &cloudKeyPoses6D->points[i]);
+        *globalSurfCloud   += *transformPointCloud(surfCloudKeyFrames[i],    &cloudKeyPoses6D->points[i]);
+        cout << "\r" << std::flush << "Processing feature cloud " << i << " of " << cloudKeyPoses6D->size() << " ...";
+    }
+
+    if(req.resolution != 0)
+    {
+    cout << "\n\nPub resolution: " << req.resolution << endl;
+
+    // 降采样
+    // downSizeFilterCorner.setInputCloud(globalCornerCloud);
+    // downSizeFilterCorner.setLeafSize(req.resolution, req.resolution, req.resolution);
+    // downSizeFilterCorner.filter(*globalCornerCloudDS);
+    // pcl::io::savePCDFileBinary(saveMapDirectory + "/CornerMap.pcd", *globalCornerCloudDS);
+    // 降采样
+    downSizeFilterSurf.setInputCloud(globalSurfCloud);
+    downSizeFilterSurf.setLeafSize(req.resolution, req.resolution, req.resolution);
+    downSizeFilterSurf.filter(*globalSurfCloudDS);
+    // pcl::io::savePCDFileBinary(saveMapDirectory + "/SurfMap.pcd", *globalSurfCloudDS);
+    }
+    else
+    {
+    //   downSizeFilterCorner.setLeafSize(mappingCornerLeafSize, mappingCornerLeafSize, mappingCornerLeafSize);
+        downSizeFilterSurf.setInputCloud(globalSurfCloud);
+        downSizeFilterSurf.setLeafSize(mappingSurfLeafSize, mappingSurfLeafSize, mappingSurfLeafSize);
+        downSizeFilterSurf.filter(*globalSurfCloudDS);
+    // pcl::io::savePCDFileBinary(saveMapDirectory + "/CornerMap.pcd", *globalCornerCloud);       
+    // pcl::io::savePCDFileBinary(saveMapDirectory + "/SurfMap.pcd", *globalSurfCloud);           //  稠密点云地图
+    }
+    // 保存到一起，全局关键帧特征点集合
+    //   *globalMapCloud += *globalCornerCloud;
+    // *globalMapCloud += *globalSurfCloud;
+    // pcl::io::savePCDFileBinary(saveMapDirectory + "/filterGlobalMap.pcd", *globalSurfCloudDS);       //  滤波后地图
+    // int ret = pcl::io::savePCDFileBinary(saveMapDirectory + "/GlobalMap.pcd", *globalMapCloud);       //  稠密地图
+    res.success = true;
+
+    // cout << "****************************************************" << endl;
+    // cout << "Saving map to pcd files completed\n" << endl;
+    ROS_INFO_STREAM("Map published successfully");
+
+      // visial optimize global map on viz
+    ros::Time timeLaserInfoStamp = ros::Time().fromSec(lidar_end_time);
+    string odometryFrame = rosNamespace + "camera_init";
+    publishCloud(&pubOptimizedGlobalMap, globalSurfCloudDS, timeLaserInfoStamp, odometryFrame);
+
+    return true;
+}
+
 /**
  * 保存全局关键帧特征点集合
 */
@@ -2303,6 +2369,9 @@ int main(int argc, char **argv)
 
     // savePose  发布轨迹保存服务
     srvSavePose  = nh.advertiseService("save_pose" ,  &savePoseService);
+
+    // PubMap 发布优化后的点云地图服务
+    srvPubMap = nh.advertiseService("pub_map" , &pubMapService);
 
     // 回环检测线程
     std::thread loopthread(&loopClosureThread);
