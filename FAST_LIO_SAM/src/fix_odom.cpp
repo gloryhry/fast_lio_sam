@@ -28,7 +28,8 @@ void callback(const nav_msgs::OdometryConstPtr slam_msg)
     tf::StampedTransform odom2lidar_transform;
     try 
     {
-        tfListener->lookupTransform(odom_frame_id, lidar_frame_id, ros::Time(0), odom2lidar_transform);
+        tfListener->waitForTransform(odom_frame_id,lidar_frame_id, slam_msg->header.stamp, ros::Duration(0.5));
+        tfListener->lookupTransform(odom_frame_id, lidar_frame_id, slam_msg->header.stamp, odom2lidar_transform);
     } 
     catch(tf::TransformException &exception) {
         ROS_WARN_STREAM(exception.what());         
