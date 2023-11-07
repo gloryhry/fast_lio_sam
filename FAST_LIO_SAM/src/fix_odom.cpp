@@ -10,6 +10,7 @@ tf::TransformListener*  tfListener;
 std::string odom_frame_id, lidar_frame_id, slam_topic;
 tf::StampedTransform trans_result;
 bool init= false;
+tf::TransformBroadcaster *tf_br;
 
 void callback(const nav_msgs::OdometryConstPtr slam_msg)
 {
@@ -41,6 +42,8 @@ void callback(const nav_msgs::OdometryConstPtr slam_msg)
     fix_T = slam_T * odom_T.inverse();
 
     trans_result = tf::StampedTransform(fix_T, slam_msg->header.stamp, world_frame_id, odom_frame_id);
+    trans_result.stamp_ = slam_msg->header.stamp;
+    tf_br->sendTransform(trans_result);
 }
 
 int main(int argc, char **argv)
@@ -49,8 +52,7 @@ int main(int argc, char **argv)
     ros::NodeHandle nh, private_nh("~");
 
     tfListener = new tf::TransformListener;
-
-    tf::TransformBroadcaster tf_br;
+    tf_br = new tf::TransformBroadcaster;
 
     private_nh.param<std::string>("odom_frame_id", odom_frame_id, "odom");
     private_nh.param<std::string>("lidar_frame_id",lidar_frame_id, "rslidar");
@@ -68,7 +70,7 @@ int main(int argc, char **argv)
         if(init)
         {
             trans_result.stamp_ = ros::Time::now();
-            tf_br.sendTransform(trans_result);
+            tf_br->sendTransform(trans_result);
         }
         rate.sleep();
     }
