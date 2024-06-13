@@ -62,17 +62,17 @@ int main(int argc, char **argv)
     ROS_INFO_STREAM("world frame id: " << world_frame_id);
 
     ros::Subscriber slam_odom_sub = nh.subscribe(slam_topic,10,&callback,ros::TransportHints().tcpNoDelay());
-    // ros::spin();
-    ros::Rate rate(50);
-    while(ros::ok())
-    {
-        ros::spinOnce();
-        if(init)
-        {
-            trans_result.stamp_ = ros::Time::now();
-            tf_br->sendTransform(trans_result);
-        }
-        rate.sleep();
-    }
+    ros::spin();
+    // ros::Rate rate(50);
+    // while(ros::ok())
+    // {
+    //     ros::spinOnce();
+    //     if(init)
+    //     {
+    //         trans_result.stamp_ = ros::Time::now();
+    //         tf_br->sendTransform(trans_result);
+    //     }
+    //     rate.sleep();
+    // }
     return 0;
 }

@@ -13,15 +13,17 @@
     <param name="filter_size_map" type="double" value="0.5" />
     <param name="cube_side_length" type="double" value="1000" />
     <param name="runtime_pos_log_enable" type="bool" value="0" />
-    <node pkg="fast_lio_sam" type="fastlio_sam_mapping" name="laserMapping" /> 
+    <node pkg="fast_lio_sam" type="fastlio_sam_mapping" name="laserMapping" output="log"/> 
 
     <group if="1">
         <node name="fix_odom_sam" pkg="fast_lio_sam" type="fix_odom_sam" output="screen">
-          <param name="odom_frame_id" type="string" value="$(arg tf_prefix)/odom" />
+          <param name="odom_frame_id" type="string" value="$(arg tf_prefix)/base_footprint" />
           <param name="lidar_frame_id" type="string" value="$(arg tf_prefix)/rslidar" />
           <param name="slam_odom" type="string" value="Odometry" />
-          <param name="world_frame_id" type="string" value="$(arg tf_prefix)/world" />
+          <param name="world_frame_id" type="string" value="$(arg tf_prefix)/odom" />
         </node>
+
+        <node pkg="tf" type="static_transform_publisher" name="world_odom_broadcaster" args="0 0 0 0.0 0.0 0.0 $(arg tf_prefix)/world $(arg tf_prefix)/odom 10" />
     </group>
 	
 

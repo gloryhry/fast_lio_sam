@@ -1,33 +1,28 @@
 common:
 #RS LiDar
-    lid_topic: "rslidar_points"
-    # lid_topic: "rslidar_points"
-    imu_topic: "imu_in_lidar/data"
+    lid_topic: "livox/lidar"
+    imu_topic: "livox/imu"
     # gnss_topic: "gnss"
     time_sync_en: false         # ONLY turn on when external time synchronization is really not possible
     
 preprocess:
-    lidar_type: 4                # 1 for Livox serials LiDAR, 2 for Velodyne LiDAR, 3 for ouster LiDAR, 4 RS
-    scan_line: 80
+    lidar_type: 5                # 1 for Livox serials LiDAR, 2 for Velodyne LiDAR, 3 for ouster LiDAR, 4 RS
+    scan_line: 4
     scan_rate: 10                # only need to be set for velodyne, unit: Hz,
-    blind: 1
+    blind: 0.1
 
 mapping:
     acc_cov: 0.1
-    gyr_cov: 0.2
+    gyr_cov: 0.1
     b_acc_cov: 0.0001
-    b_gyr_cov: 0.001
-    fov_degree:    180
+    b_gyr_cov: 0.0001
+    fov_degree:    360
     det_range:     100.0
     extrinsic_est_en:  false      # true: enable the online estimation of IMU-LiDAR extrinsic,
-    extrinsic_T: [ 0, 0.0, 0]
-    extrinsic_R: [1, 0, 0,
-                  0, 1, 0,
-                  0, 0, 1]
-
-    # [ 0.998449,   0.0501005,   -0.024268,
-    #                -0.0500944,    0.998744, 0.000858258,
-    #                0.0242805, 0.000358762,    0.999705]
+    extrinsic_T: [ -0.011, -0.02329, 0.04412 ]
+    extrinsic_R: [ 1, 0, 0,
+                   0, 1, 0,
+                   0, 0, 1]
 
 publish:
     path_en:  true
@@ -76,8 +71,8 @@ historyKeyframeFitnessScore: 0.3              # icp threshold, the smaller the b
 
 # Visualization
 globalMapVisualizationSearchRadius: 1000.0    # meters, global map visualization radius
-globalMapVisualizationPoseDensity: 1         # meters, global map visualization keyframe density
-globalMapVisualizationLeafSize: 0.3             # meters, global map visualization cloud density
+globalMapVisualizationPoseDensity: 10         # meters, global map visualization keyframe density
+globalMapVisualizationLeafSize: 1.0             # meters, global map visualization cloud density
 
 # visual iktree_map  
 visulize_IkdtreeMap: true

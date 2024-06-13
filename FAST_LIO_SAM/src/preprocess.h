@@ -10,7 +10,7 @@ using namespace std;
 typedef pcl::PointXYZINormal PointType;
 typedef pcl::PointCloud<PointType> PointCloudXYZI;
 
-enum LID_TYPE{AVIA = 1, VELO16, OUST64, RS128}; //{1, 2, 3, 4}
+enum LID_TYPE{AVIA = 1, VELO16, OUST64, RS128, MID360}; //{1, 2, 3, 4}
 enum Feature{Nor, Poss_Plane, Real_Plane, Edge_Jump, Edge_Plane, Wire, ZeroPoint};//未判断，可能平面，平面，跳跃边，平面交接边,细线
 enum Surround{Prev, Next};
 enum E_jump{Nr_nor, Nr_zero, Nr_180, Nr_inf, Nr_blind}; // 未判断，接近0度，接近180度，接近远端，接近近端
@@ -33,6 +33,26 @@ struct orgtype
     intersect = 2;
   }
 };
+
+namespace mid360_ros {
+  struct EIGEN_ALIGN16 Point {
+      PCL_ADD_POINT4D;
+      double timestamp;
+      float intensity;
+      uint8_t tag;
+      uint8_t line;
+      EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+  };
+}  // namespace mid360_ros
+POINT_CLOUD_REGISTER_POINT_STRUCT(mid360_ros::Point,
+    (float, x, x)
+    (float, y, y)
+    (float, z, z)
+    (double, timestamp, timestamp)
+    (float, intensity, intensity)
+    (uint8_t, tag, tag)
+    (uint8_t, line, line)
+)
 
 namespace velodyne_ros {
   struct EIGEN_ALIGN16 Point {
@@ -144,6 +164,7 @@ class Preprocess
 
   private:
   void avia_handler(const livox_ros_driver::CustomMsg::ConstPtr &msg);
+  void mid360_handler(const sensor_msgs::PointCloud2::ConstPtr &msg);
   void oust64_handler(const sensor_msgs::PointCloud2::ConstPtr &msg);
   void velodyne_handler(const sensor_msgs::PointCloud2::ConstPtr &msg);
   void rs_handler(const sensor_msgs::PointCloud2::ConstPtr &msg);
