@@ -43,7 +43,7 @@ RUN mkdir -p /Software \
 COPY . /catkin_ws/src/FAST-LIO-SAM/
 
 # 构建ROS包
-RUN . /opt/ros/foxy/setup.sh  \
+RUN . /opt/ros/noetic/setup.sh  \
     && catkin_make livox_ros_driver_gencpp \
     && catkin_make livox_ros_driver2_gencpp \
     && catkin_make 
