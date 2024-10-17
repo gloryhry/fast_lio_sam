@@ -2,11 +2,13 @@ name: Build and Push Docker Image
 
 on:
   push:
-    branches:
-      - master
-  pull_request:
-    branches:
-      - master
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      name:
+        description: 'reason'
+        required: false
 
 jobs:
   build-and-push:
@@ -28,12 +30,12 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # - name: Extract metadata (labels) for Docker
-      #   id: meta
-      #   uses: docker/metadata-action@v4
-      #   with:
-      #     images: |
-      #       ghcr.io/${{ github.repository }}
+      - name: Extract metadata (labels) for Docker
+        id: meta
+        uses: docker/metadata-action@v4
+        with:
+          images: |
+            ghcr.io/${{ github.repository }}
 
       - name: Build and push Docker images
         uses: docker/build-push-action@v3
@@ -41,5 +43,5 @@ jobs:
           context: .
           # platforms: linux/amd64
           push: true
-          # tags: ${{ steps.meta.outputs.tags }}
-          # labels: ${{ steps.meta.outputs.labels }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
