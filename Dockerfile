@@ -42,8 +42,8 @@ RUN mkdir -p /Software \
 # 将本目录下所有文件复制到/catkin_ws/src/FAST-LIO-SAM下
 COPY . /catkin_ws/src/FAST-LIO-SAM/
 
-# 构建ROS包
-RUN source /opt/ros/noetic/setup.bash  \
-    && catkin_make livox_ros_driver_gencpp \
-    && catkin_make livox_ros_driver2_gencpp \
-    && catkin_make 
+# # 构建ROS包
+# RUN source /opt/ros/noetic/setup.bash  \
+#     && catkin_make livox_ros_driver_gencpp \
+#     && catkin_make livox_ros_driver2_gencpp \
+#     && catkin_make 
