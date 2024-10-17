@@ -18,13 +18,13 @@ RUN mkdir -p /Software \
     && cd geographiclib \
     && mkdir build && cd build \
     && cmake .. \
-    && make \
+    && make -j \
     && make install \ 
     && cd /Software \
     && git clone https://github.com/Livox-SDK/Livox-SDK.git \
     && cd Livox-SDK \
     && cd build && cmake .. \
-    && make \
+    && make -j \
     && make install \
     && cd /Software \
     && git clone https://github.com/Livox-SDK/Livox-SDK2.git \
