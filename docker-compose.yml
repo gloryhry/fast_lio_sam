@@ -1,0 +1,12 @@
+version: '3.8'
+
+services:
+  fast_lio_sam:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: fast_lio_sam
+    volumes:
+      - .:/catkin_ws/src/FAST-LIO-SAM
+    tty: true
+    stdin_open: true
