@@ -9,7 +9,7 @@ RUN apt-get update \
     && apt-get install -y software-properties-common \
     && add-apt-repository ppa:borglab/gtsam-release-4.0 \
     && apt-get update \
-    && apt-get install -y libgtsam-dev libgtsam-unstable-dev cmake
+    && apt-get install -y libgtsam-dev libgtsam-unstable-dev cmake ros-noetic-pcl-ros
 
 # 创建Software目录并克隆geographiclib库
 RUN mkdir -p /Software \

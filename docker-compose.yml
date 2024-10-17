@@ -2,9 +2,7 @@ version: '3.8'
 
 services:
   fast_lio_sam:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    image: ghcr.io/gloryhry/fast_lio_sam:latest
     container_name: fast_lio_sam
     volumes:
       - .:/catkin_ws/src/FAST-LIO-SAM
