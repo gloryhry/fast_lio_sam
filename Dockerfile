@@ -32,10 +32,9 @@ RUN mkdir -p /Software \
     && mkdir build && cd build \
     && cmake .. && make -j \
     && make install \
+    && cd / \
     && rm -rf /Software \
-
-
-RUN mkdir -p /catkin_ws/src/FAST-LIO-SAM \
+    && mkdir -p /catkin_ws/src/FAST-LIO-SAM \
     && cd /catkin_ws/src/ \
     && git clone https://github.com/Livox-SDK/livox_ros_driver.git \
     && git clone https://github.com/gloryhry/livox_ros_driver2_ros1.git
