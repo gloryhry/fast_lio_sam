@@ -175,6 +175,13 @@ V3D position_last(Zero3d);
 V3D Lidar_T_wrt_IMU(Zero3d); // T lidar to imu (imu = r * lidar + t)
 M3D Lidar_R_wrt_IMU(Eye3d);  // R lidar to imu (imu = r * lidar + t)
 
+// 新增：传感器到 base_link 的外参
+V3D Imu_T_wrt_Baselink(Zero3d);     // IMU 到 base_link 的平移
+M3D Imu_R_wrt_Baselink(Eye3d);      // IMU 到 base_link 的旋转
+V3D Lidar_T_wrt_Baselink(Zero3d);   // Lidar 到 base_link 的平移
+M3D Lidar_R_wrt_Baselink(Eye3d);    // Lidar 到 base_link 的旋转
+bool enable_input_transform = false; // 是否启用输入坐标转换
+
 /*** EKF inputs and output ***/
 MeasureGroup Measures;
 esekfom::esekf<state_ikfom, 12, input_ikfom> kf; // 状态，噪声维度，输入
@@ -670,18 +677,18 @@ void addGPSFactor()
             return;
     }
     // 位姿协方差很小，没必要加入GPS数据进行校正
-    if (poseCovariance(3,3) < poseCovThreshold && poseCovariance(4,4) < poseCovThreshold)
-        return;
+    // if (poseCovariance(3,3) < poseCovThreshold && poseCovariance(4,4) < poseCovThreshold)
+    //     return;
     static PointType lastGPSPoint;      // 最新的gps数据
     while (!gnss_buffer.empty())
     {
         // 删除当前帧0.2s之前的里程计
-        if (gnss_buffer.front().header.stamp.toSec() < lidar_end_time - 0.05)
+        if (gnss_buffer.front().header.stamp.toSec() < lidar_end_time - 0.1)
         {
             gnss_buffer.pop_front();
         }
         // 超过当前帧0.2s之后，退出
-        else if (gnss_buffer.front().header.stamp.toSec() > lidar_end_time + 0.05)
+        else if (gnss_buffer.front().header.stamp.toSec() > lidar_end_time + 0.1)
         {
             break;
         }
@@ -1279,6 +1286,33 @@ void standard_pcl_cbk(const sensor_msgs::PointCloud2::ConstPtr &msg)
 
     PointCloudXYZI::Ptr ptr(new PointCloudXYZI());
     p_pre->process(msg, ptr);
+
+    // 新增：如果启用输入坐标转换，转换点云到 base_link
+    if (enable_input_transform)
+    {
+        PointCloudXYZI::Ptr transformed_ptr(new PointCloudXYZI());
+        transformed_ptr->reserve(ptr->size());
+
+        for (size_t i = 0; i < ptr->size(); i++)
+        {
+            PointType p_in = ptr->points[i];
+            PointType p_out;
+
+            V3D p_lidar(p_in.x, p_in.y, p_in.z);
+            V3D p_baselink = Lidar_R_wrt_Baselink * p_lidar + Lidar_T_wrt_Baselink;
+
+            p_out.x = p_baselink.x();
+            p_out.y = p_baselink.y();
+            p_out.z = p_baselink.z();
+            p_out.intensity = p_in.intensity;
+            p_out.curvature = p_in.curvature;
+
+            transformed_ptr->push_back(p_out);
+        }
+
+        ptr = transformed_ptr;
+    }
+
     lidar_buffer.push_back(ptr);
     time_buffer.push_back(msg->header.stamp.toSec());
     last_timestamp_lidar = msg->header.stamp.toSec();
@@ -1317,6 +1351,33 @@ void livox_pcl_cbk(const livox_ros_driver::CustomMsg::ConstPtr &msg)
 
     // 特征提取或间隔采样
     p_pre->process(msg, ptr);
+
+    // 新增：如果启用输入坐标转换，转换点云到 base_link
+    if (enable_input_transform)
+    {
+        PointCloudXYZI::Ptr transformed_ptr(new PointCloudXYZI());
+        transformed_ptr->reserve(ptr->size());
+
+        for (size_t i = 0; i < ptr->size(); i++)
+        {
+            PointType p_in = ptr->points[i];
+            PointType p_out;
+
+            V3D p_lidar(p_in.x, p_in.y, p_in.z);
+            V3D p_baselink = Lidar_R_wrt_Baselink * p_lidar + Lidar_T_wrt_Baselink;
+
+            p_out.x = p_baselink.x();
+            p_out.y = p_baselink.y();
+            p_out.z = p_baselink.z();
+            p_out.intensity = p_in.intensity;
+            p_out.curvature = p_in.curvature;
+
+            transformed_ptr->push_back(p_out);
+        }
+
+        ptr = transformed_ptr;
+    }
+
     lidar_buffer.push_back(ptr); //储存处理后的lidar特征
     time_buffer.push_back(last_timestamp_lidar);
 
@@ -1337,6 +1398,38 @@ void imu_cbk(const sensor_msgs::Imu::ConstPtr &msg_in)
         // 对输入imu时间，纠正为 时间差 + 原始时间
         msg->header.stamp =
             ros::Time().fromSec(timediff_lidar_wrt_imu + msg_in->header.stamp.toSec());
+    }
+
+    // 新增：如果启用输入坐标转换，转换 IMU 数据到 base_link
+    if (enable_input_transform)
+    {
+        // 转换线性加速度
+        V3D acc(msg->linear_acceleration.x,
+                msg->linear_acceleration.y,
+                msg->linear_acceleration.z);
+        acc = Imu_R_wrt_Baselink * acc;
+        msg->linear_acceleration.x = acc.x();
+        msg->linear_acceleration.y = acc.y();
+        msg->linear_acceleration.z = acc.z();
+
+        // 转换角速度
+        V3D gyro(msg->angular_velocity.x,
+                 msg->angular_velocity.y,
+                 msg->angular_velocity.z);
+        gyro = Imu_R_wrt_Baselink * gyro;
+        msg->angular_velocity.x = gyro.x();
+        msg->angular_velocity.y = gyro.y();
+        msg->angular_velocity.z = gyro.z();
+
+        // 转换姿态（四元数）
+        Eigen::Quaterniond q(msg->orientation.w, msg->orientation.x,
+                             msg->orientation.y, msg->orientation.z);
+        Eigen::Quaterniond q_rot(Imu_R_wrt_Baselink);
+        q = q_rot * q;
+        msg->orientation.w = q.w();
+        msg->orientation.x = q.x();
+        msg->orientation.y = q.y();
+        msg->orientation.z = q.z();
     }
 
     double timestamp = msg->header.stamp.toSec();
@@ -1414,7 +1507,7 @@ void gnss_cbk(const sensor_msgs::NavSatFixConstPtr& msg_in)
 
         gnss_pose(0,3) = gnss_data.local_E ;
         gnss_pose(1,3) = gnss_data.local_N ;
-        gnss_pose(2,3) =gnss_data.local_U ;
+        gnss_pose(2,3) = gnss_data.local_U ;
 
         Eigen::Isometry3d gnss_to_lidar(Gnss_R_wrt_Lidar) ;
         gnss_to_lidar.pretranslate(Gnss_T_wrt_Lidar);
@@ -2224,6 +2317,42 @@ int main(int argc, char **argv)
     nh.param<vector<double>>("mapping/extrinsic_T", extrinT, vector<double>());
     nh.param<vector<double>>("mapping/extrinsic_R", extrinR, vector<double>());
     cout << "p_pre->lidar_type " << p_pre->lidar_type << endl;
+
+    // 新增：读取输入转换外参
+    nh.param<bool>("input_transform/enable", enable_input_transform, false);
+    vector<double> imu_to_baselink_T_vec, imu_to_baselink_R_vec;
+    vector<double> lidar_to_baselink_T_vec, lidar_to_baselink_R_vec;
+    nh.param<vector<double>>("input_transform/imu_to_baselink_T", imu_to_baselink_T_vec, vector<double>());
+    nh.param<vector<double>>("input_transform/imu_to_baselink_R", imu_to_baselink_R_vec, vector<double>());
+    nh.param<vector<double>>("input_transform/lidar_to_baselink_T", lidar_to_baselink_T_vec, vector<double>());
+    nh.param<vector<double>>("input_transform/lidar_to_baselink_R", lidar_to_baselink_R_vec, vector<double>());
+
+    // 初始化转换矩阵
+    if (enable_input_transform)
+    {
+        if (imu_to_baselink_T_vec.size() == 3)
+        {
+            Imu_T_wrt_Baselink << VEC_FROM_ARRAY(imu_to_baselink_T_vec);
+        }
+        if (imu_to_baselink_R_vec.size() == 9)
+        {
+            Imu_R_wrt_Baselink << MAT_FROM_ARRAY(imu_to_baselink_R_vec);
+        }
+        if (lidar_to_baselink_T_vec.size() == 3)
+        {
+            Lidar_T_wrt_Baselink << VEC_FROM_ARRAY(lidar_to_baselink_T_vec);
+        }
+        if (lidar_to_baselink_R_vec.size() == 9)
+        {
+            Lidar_R_wrt_Baselink << MAT_FROM_ARRAY(lidar_to_baselink_R_vec);
+        }
+
+        ROS_INFO("Input transform enabled:");
+        ROS_INFO("  IMU->Baselink T: [%.3f, %.3f, %.3f]",
+                 Imu_T_wrt_Baselink.x(), Imu_T_wrt_Baselink.y(), Imu_T_wrt_Baselink.z());
+        ROS_INFO("  Lidar->Baselink T: [%.3f, %.3f, %.3f]",
+                 Lidar_T_wrt_Baselink.x(), Lidar_T_wrt_Baselink.y(), Lidar_T_wrt_Baselink.z());
+    }
 
     nh.param<float>("odometrySurfLeafSize", odometrySurfLeafSize, 0.2);
     nh.param<float>("mappingCornerLeafSize", mappingCornerLeafSize, 0.2);
