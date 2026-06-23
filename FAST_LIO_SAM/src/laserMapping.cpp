@@ -55,6 +55,7 @@
 #include <sensor_msgs/PointCloud2.h>
 #include <tf/transform_datatypes.h>
 #include <tf/transform_broadcaster.h>
+#include <tf2_ros/static_transform_broadcaster.h>
 #include <geometry_msgs/Vector3.h>
 #include <livox_ros_driver/CustomMsg.h>
 #include "preprocess.h"
@@ -190,6 +191,8 @@ vect3 pos_lid; // world系下lidar坐标
 
 nav_msgs::Path path;
 nav_msgs::Odometry odomAftMapped;
+ros::Publisher pubLidarOdomAftMapped;
+ros::Publisher pubImuOdomAftMapped;
 geometry_msgs::Quaternion geoQuat;
 geometry_msgs::PoseStamped msg_body_pose;
 
@@ -328,12 +331,18 @@ string savePCDDirectory;    // 保存路径
 // 获取ros namespace
 std::string rosNamespace;
 
+// Frame IDs (可配置的坐标系名称)
+std::string odometryFrame;
+std::string base_linkFrame;
+std::string lidar_linkFrame;
+std::string imu_linkFrame;
+std::string mapFrame;
+
 /**
  * 更新里程计轨迹
  */
 void updatePath(const PointTypePose &pose_in)
 {
-    string odometryFrame = rosNamespace + "camera_init";
     geometry_msgs::PoseStamped pose_stamped;
     pose_stamped.header.stamp = ros::Time().fromSec(pose_in.time);
 
@@ -525,7 +534,6 @@ void getCurPose(state_ikfom cur_state)
 void visualizeLoopClosure()
 {
     ros::Time timeLaserInfoStamp = ros::Time().fromSec(lidar_end_time); //  时间戳
-    string odometryFrame = rosNamespace + "camera_init";
 
     if (loopIndexContainer.empty())
         return;
@@ -1138,7 +1146,6 @@ void loopFindNearKeyframes(pcl::PointCloud<PointType>::Ptr &nearKeyframes, const
 void performLoopClosure()
 {
     ros::Time timeLaserInfoStamp = ros::Time().fromSec(lidar_end_time); //  时间戳
-    string odometryFrame = rosNamespace + "camera_init";
 
     if (cloudKeyPoses3D->points.empty() == true)
     {
@@ -1651,7 +1658,7 @@ void gnss_cbk(const sensor_msgs::NavSatFixConstPtr& msg_in)
         }
 
         // visial gnss path in rviz:
-        msg_gnss_pose.header.frame_id = rosNamespace + "camera_init";
+        msg_gnss_pose.header.frame_id = odometryFrame;
         msg_gnss_pose.header.stamp = ros::Time().fromSec(gnss_data.time);
         // Eigen::Vector3d gnss_pose_ (gnss_data.local_E, gnss_data.local_N, - gnss_data.local_U); 
         // Eigen::Vector3d gnss_pose_ (gnss_data.local_N, gnss_data.local_E, - gnss_data.local_U); 
@@ -1827,7 +1834,7 @@ void publish_frame_world(const ros::Publisher &pubLaserCloudFull)         //    
         sensor_msgs::PointCloud2 laserCloudmsg;
         pcl::toROSMsg(*laserCloudWorld, laserCloudmsg);
         laserCloudmsg.header.stamp = ros::Time().fromSec(lidar_end_time);
-        laserCloudmsg.header.frame_id = rosNamespace + "camera_init";
+        laserCloudmsg.header.frame_id = odometryFrame;
         pubLaserCloudFull.publish(laserCloudmsg);
         publish_count -= PUBFRAME_PERIOD;
     }
@@ -1877,7 +1884,7 @@ void publish_frame_body(const ros::Publisher &pubLaserCloudFull_body)          /
     sensor_msgs::PointCloud2 laserCloudmsg;
     pcl::toROSMsg(*laserCloudIMUBody, laserCloudmsg);
     laserCloudmsg.header.stamp = ros::Time().fromSec(lidar_end_time);
-    laserCloudmsg.header.frame_id = rosNamespace + "body";
+    laserCloudmsg.header.frame_id = base_linkFrame;
     pubLaserCloudFull_body.publish(laserCloudmsg);
     publish_count -= PUBFRAME_PERIOD;
 }
@@ -1894,7 +1901,7 @@ void publish_effect_world(const ros::Publisher &pubLaserCloudEffect)
     sensor_msgs::PointCloud2 laserCloudFullRes3;
     pcl::toROSMsg(*laserCloudWorld, laserCloudFullRes3);
     laserCloudFullRes3.header.stamp = ros::Time().fromSec(lidar_end_time);
-    laserCloudFullRes3.header.frame_id = rosNamespace + "camera_init";
+    laserCloudFullRes3.header.frame_id = odometryFrame;
     pubLaserCloudEffect.publish(laserCloudFullRes3);
 }
 
@@ -1903,7 +1910,7 @@ void publish_map(const ros::Publisher &pubLaserCloudMap)
     sensor_msgs::PointCloud2 laserCloudMap;
     pcl::toROSMsg(*featsFromMap, laserCloudMap);
     laserCloudMap.header.stamp = ros::Time().fromSec(lidar_end_time);
-    laserCloudMap.header.frame_id = rosNamespace + "camera_init";
+    laserCloudMap.header.frame_id = odometryFrame;
     pubLaserCloudMap.publish(laserCloudMap);
 }
 
@@ -1921,8 +1928,8 @@ void set_posestamp(T &out)
 
 void publish_odometry(const ros::Publisher &pubOdomAftMapped)
 {
-    odomAftMapped.header.frame_id = rosNamespace + "camera_init";
-    odomAftMapped.child_frame_id = rosNamespace + "body";
+    odomAftMapped.header.frame_id = odometryFrame;
+    odomAftMapped.child_frame_id = base_linkFrame;
     odomAftMapped.header.stamp = ros::Time().fromSec(lidar_end_time); // ros::Time().fromSec(lidar_end_time);
     set_posestamp(odomAftMapped.pose);
     pubOdomAftMapped.publish(odomAftMapped);
@@ -1949,14 +1956,65 @@ void publish_odometry(const ros::Publisher &pubOdomAftMapped)
     q.setY(odomAftMapped.pose.pose.orientation.y);
     q.setZ(odomAftMapped.pose.pose.orientation.z);
     transform.setRotation(q);
-    br.sendTransform(tf::StampedTransform(transform, odomAftMapped.header.stamp, rosNamespace + "camera_init", rosNamespace + "body"));
+    br.sendTransform(tf::StampedTransform(transform, odomAftMapped.header.stamp, odometryFrame, base_linkFrame));
+
+    // 如果启用了 input_transform，根据 odomAftMapped 发布 lidar_link 和 imu_link 的 odometry
+    if (enable_input_transform)
+    {
+        // T_odom_to_base: 从 odomAftMapped 获取
+        Eigen::Quaterniond q_odom_base(
+            odomAftMapped.pose.pose.orientation.w,
+            odomAftMapped.pose.pose.orientation.x,
+            odomAftMapped.pose.pose.orientation.y,
+            odomAftMapped.pose.pose.orientation.z);
+        Eigen::Vector3d t_odom_base(
+            odomAftMapped.pose.pose.position.x,
+            odomAftMapped.pose.pose.position.y,
+            odomAftMapped.pose.pose.position.z);
+
+        // T_base_lidar: Lidar_R_wrt_Baselink/Lidar_T_wrt_Baselink 本身即为 base_link 帧下 LiDAR 的位姿
+        // T_odom_to_lidar = T_odom_to_base * T_base_lidar
+        Eigen::Quaterniond q_base_lidar(Lidar_R_wrt_Baselink);
+        Eigen::Quaterniond q_odom_lidar = q_odom_base * q_base_lidar;
+        Eigen::Vector3d t_odom_lidar = q_odom_base * Lidar_T_wrt_Baselink + t_odom_base;
+
+        nav_msgs::Odometry lidar_odom = odomAftMapped;
+        lidar_odom.header.frame_id = odometryFrame;
+        lidar_odom.child_frame_id = lidar_linkFrame;
+        lidar_odom.pose.pose.position.x = t_odom_lidar.x();
+        lidar_odom.pose.pose.position.y = t_odom_lidar.y();
+        lidar_odom.pose.pose.position.z = t_odom_lidar.z();
+        lidar_odom.pose.pose.orientation.x = q_odom_lidar.x();
+        lidar_odom.pose.pose.orientation.y = q_odom_lidar.y();
+        lidar_odom.pose.pose.orientation.z = q_odom_lidar.z();
+        lidar_odom.pose.pose.orientation.w = q_odom_lidar.w();
+        pubLidarOdomAftMapped.publish(lidar_odom);
+
+        // T_base_imu: Imu_R_wrt_Baselink/Imu_T_wrt_Baselink 本身即为 base_link 帧下 IMU 的位姿
+        // T_odom_to_imu = T_odom_to_base * T_base_imu
+        Eigen::Quaterniond q_base_imu(Imu_R_wrt_Baselink);
+        Eigen::Quaterniond q_odom_imu = q_odom_base * q_base_imu;
+        Eigen::Vector3d t_odom_imu = q_odom_base * Imu_T_wrt_Baselink + t_odom_base;
+
+        nav_msgs::Odometry imu_odom = odomAftMapped;
+        imu_odom.header.frame_id = odometryFrame;
+        imu_odom.child_frame_id = imu_linkFrame;
+        imu_odom.pose.pose.position.x = t_odom_imu.x();
+        imu_odom.pose.pose.position.y = t_odom_imu.y();
+        imu_odom.pose.pose.position.z = t_odom_imu.z();
+        imu_odom.pose.pose.orientation.x = q_odom_imu.x();
+        imu_odom.pose.pose.orientation.y = q_odom_imu.y();
+        imu_odom.pose.pose.orientation.z = q_odom_imu.z();
+        imu_odom.pose.pose.orientation.w = q_odom_imu.w();
+        pubImuOdomAftMapped.publish(imu_odom);
+    }
 }
 
 void publish_path(const ros::Publisher pubPath)
 {
     set_posestamp(msg_body_pose);
     msg_body_pose.header.stamp = ros::Time().fromSec(lidar_end_time);
-    msg_body_pose.header.frame_id = rosNamespace + "camera_init";
+    msg_body_pose.header.frame_id = odometryFrame;
 
     /*** if path is too large, the rvis will crash ***/
     static int jjj = 0;
@@ -1983,7 +2041,6 @@ void publish_path(const ros::Publisher pubPath)
 void publish_path_update(const ros::Publisher pubPath)
 {
     ros::Time timeLaserInfoStamp = ros::Time().fromSec(lidar_end_time); //  时间戳
-    string odometryFrame = rosNamespace + "camera_init";
     if (pubPath.getNumSubscribers() != 0)
     {
         /*** if path is too large, the rvis will crash ***/
@@ -2003,7 +2060,7 @@ void publish_path_update(const ros::Publisher pubPath)
 void publish_gnss_path(const ros::Publisher pubPath)
 {
     gps_path.header.stamp = ros::Time().fromSec(lidar_end_time);
-    gps_path.header.frame_id = rosNamespace + "camera_init";
+    gps_path.header.frame_id = odometryFrame;
 
     static int jjj = 0;
     jjj++;
@@ -2148,7 +2205,6 @@ bool pubMapService(fast_lio_sam::save_mapRequest& req, fast_lio_sam::save_mapRes
 
       // visial optimize global map on viz
     ros::Time timeLaserInfoStamp = ros::Time().fromSec(lidar_end_time);
-    string odometryFrame = rosNamespace + "camera_init";
     publishCloud(&pubOptimizedGlobalMap, globalSurfCloudDS, timeLaserInfoStamp, odometryFrame);
 
     return true;
@@ -2224,7 +2280,6 @@ bool saveMapService(fast_lio_sam::save_mapRequest& req, fast_lio_sam::save_mapRe
 
       // visial optimize global map on viz
     ros::Time timeLaserInfoStamp = ros::Time().fromSec(lidar_end_time);
-    string odometryFrame = rosNamespace + "camera_init";
     publishCloud(&pubOptimizedGlobalMap, globalSurfCloudDS, timeLaserInfoStamp, odometryFrame);
 
       return true;
@@ -2248,7 +2303,6 @@ void publishGlobalMap()
 {
     /*** if path is too large, the rvis will crash ***/
     ros::Time timeLaserInfoStamp = ros::Time().fromSec(lidar_end_time);
-    string odometryFrame = rosNamespace + "camera_init";
     if (pubLaserCloudSurround.getNumSubscribers() == 0)
         return;
 
@@ -2438,6 +2492,14 @@ int main(int argc, char **argv)
     if(rosNamespace != ""){
         rosNamespace = rosNamespace + "/";
     }
+
+    // Frame ID 参数配置
+    nh.param<std::string>("odometryFrame", odometryFrame, rosNamespace + "odom");
+    nh.param<std::string>("base_linkFrame", base_linkFrame, rosNamespace + "base_link");
+    nh.param<std::string>("lidar_linkFrame", lidar_linkFrame, rosNamespace + "lidar");
+    nh.param<std::string>("imu_linkFrame", imu_linkFrame, rosNamespace + "imu");
+    nh.param<std::string>("mapFrame", mapFrame, rosNamespace + "map");
+
     nh.param<bool>("publish/path_en", path_en, true);
     nh.param<bool>("publish/scan_publish_en", scan_pub_en, true);
     nh.param<bool>("publish/dense_publish_en", dense_pub_en, true);
@@ -2572,7 +2634,7 @@ int main(int argc, char **argv)
     isam = new gtsam::ISAM2(parameters);
 
     path.header.stamp = ros::Time::now();
-    path.header.frame_id = rosNamespace + "camera_init";
+    path.header.frame_id = odometryFrame;
 
     /*** variables definition ***/
     int effect_feat_num = 0, frame_num = 0;
@@ -2630,7 +2692,7 @@ int main(int argc, char **argv)
     ros::Publisher pubLaserCloudFull_body = nh.advertise<sensor_msgs::PointCloud2>("cloud_registered_body", 100000);      //  body系下稠密点云
     ros::Publisher pubLaserCloudEffect = nh.advertise<sensor_msgs::PointCloud2>("cloud_effected", 100000);         //  no used
     ros::Publisher pubLaserCloudMap = nh.advertise<sensor_msgs::PointCloud2>("Laser_map", 100000);                    //  no used
-    ros::Publisher pubOdomAftMapped = nh.advertise<nav_msgs::Odometry>("Odometry", 100000);
+    ros::Publisher pubOdomAftMapped = nh.advertise<nav_msgs::Odometry>("/base_link/odom", 100000);
     ros::Publisher pubPath = nh.advertise<nav_msgs::Path>("path", 1e00000);
 
     ros::Publisher pubPathUpdate = nh.advertise<nav_msgs::Path>("fast_lio_sam/path_update", 100000);                   //  isam更新后的path
@@ -2645,6 +2707,61 @@ int main(int argc, char **argv)
     pubIcpKeyFrames = nh.advertise<sensor_msgs::PointCloud2>("fast_lio_sam/mapping/icp_loop_closure_corrected_cloud", 1);
     // 发布闭环边，rviz中表现为闭环帧之间的连线
     pubLoopConstraintEdge = nh.advertise<visualization_msgs::MarkerArray>("fast_lio_sam/mapping/loop_closure_constraints", 1);
+
+    // lidar_link 和 imu_link 的 odometry
+    pubLidarOdomAftMapped = nh.advertise<nav_msgs::Odometry>("/lidar_link/odom", 100000);
+    pubImuOdomAftMapped = nh.advertise<nav_msgs::Odometry>("/imu_link/odom", 100000);
+
+    // 发布静态 TF
+    static tf2_ros::StaticTransformBroadcaster static_br;
+    geometry_msgs::TransformStamped static_transformStamped;
+
+    // map -> odom (identity: 平移和四元数均为0)
+    static_transformStamped.header.stamp = ros::Time::now();
+    static_transformStamped.header.frame_id = mapFrame;
+    static_transformStamped.child_frame_id = odometryFrame;
+    static_transformStamped.transform.translation.x = 0;
+    static_transformStamped.transform.translation.y = 0;
+    static_transformStamped.transform.translation.z = 0;
+    static_transformStamped.transform.rotation.x = 0;
+    static_transformStamped.transform.rotation.y = 0;
+    static_transformStamped.transform.rotation.z = 0;
+    static_transformStamped.transform.rotation.w = 1;
+    static_br.sendTransform(static_transformStamped);
+
+    // 如果启用 input_transform，发布 base_link 到 lidar_link 和 imu_link 的静态 TF
+    if (enable_input_transform)
+    {
+        // base_link -> lidar_link
+        geometry_msgs::TransformStamped base_to_lidar_stamped;
+        base_to_lidar_stamped.header.stamp = ros::Time::now();
+        base_to_lidar_stamped.header.frame_id = base_linkFrame;
+        base_to_lidar_stamped.child_frame_id = lidar_linkFrame;
+        base_to_lidar_stamped.transform.translation.x = Lidar_T_wrt_Baselink.x();
+        base_to_lidar_stamped.transform.translation.y = Lidar_T_wrt_Baselink.y();
+        base_to_lidar_stamped.transform.translation.z = Lidar_T_wrt_Baselink.z();
+        Eigen::Quaterniond q_lidar_base(Lidar_R_wrt_Baselink);
+        base_to_lidar_stamped.transform.rotation.x = q_lidar_base.x();
+        base_to_lidar_stamped.transform.rotation.y = q_lidar_base.y();
+        base_to_lidar_stamped.transform.rotation.z = q_lidar_base.z();
+        base_to_lidar_stamped.transform.rotation.w = q_lidar_base.w();
+        static_br.sendTransform(base_to_lidar_stamped);
+
+        // base_link -> imu_link
+        geometry_msgs::TransformStamped base_to_imu_stamped;
+        base_to_imu_stamped.header.stamp = ros::Time::now();
+        base_to_imu_stamped.header.frame_id = base_linkFrame;
+        base_to_imu_stamped.child_frame_id = imu_linkFrame;
+        base_to_imu_stamped.transform.translation.x = Imu_T_wrt_Baselink.x();
+        base_to_imu_stamped.transform.translation.y = Imu_T_wrt_Baselink.y();
+        base_to_imu_stamped.transform.translation.z = Imu_T_wrt_Baselink.z();
+        Eigen::Quaterniond q_imu_base(Imu_R_wrt_Baselink);
+        base_to_imu_stamped.transform.rotation.x = q_imu_base.x();
+        base_to_imu_stamped.transform.rotation.y = q_imu_base.y();
+        base_to_imu_stamped.transform.rotation.z = q_imu_base.z();
+        base_to_imu_stamped.transform.rotation.w = q_imu_base.w();
+        static_br.sendTransform(base_to_imu_stamped);
+    }
 
     // gnss
     ros::Subscriber sub_gnss = nh.subscribe(gnss_topic, 200000, gnss_cbk);
