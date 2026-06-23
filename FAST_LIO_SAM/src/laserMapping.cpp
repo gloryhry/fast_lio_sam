@@ -81,6 +81,9 @@
 #include <pcl/io/pcd_io.h>
 #include <pcl/filters/filter.h>
 #include <pcl/filters/crop_box.h>
+#include <pcl/features/normal_3d_omp.h>
+#include <pcl/segmentation/sac_segmentation.h>
+#include <pcl/filters/extract_indices.h>
 #include <pcl_conversions/pcl_conversions.h>
 
 // gstam
@@ -183,6 +186,22 @@ M3D Imu_R_wrt_Baselink(Eye3d);      // IMU 到 base_link 的旋转
 V3D Lidar_T_wrt_Baselink(Zero3d);   // Lidar 到 base_link 的平移
 M3D Lidar_R_wrt_Baselink(Eye3d);    // Lidar 到 base_link 的旋转
 bool enable_input_transform = false; // 是否启用输入坐标转换
+
+// 地面分割参数
+bool enable_ground_seg = false;
+float ground_distance = 3.75f;           // XY范围：候选地面点范围(m)
+float clip_hight = 0.3f;                 // 地面以上裁剪高度(m)
+float ground_distancethreshold = 0.2f;   // RANSAC平面拟合距离阈值(m)
+float base_link_hight = 0.5f;            // base_link原点距真实地面高度(m)
+float min_distance_f = 0.05f;            // 前方虚拟地面点范围(m)
+float min_distance_b = 0.5f;             // 后方虚拟地面点范围(m)
+float min_distance_l = 0.25f;            // 左方虚拟地面点范围(m)
+float min_distance_r = 0.25f;            // 右方虚拟地面点范围(m)
+int   extra_ground_filter_num = 2;       // 降采样间隔
+
+// 地面分割Publisher
+ros::Publisher pubGroundCloud;
+ros::Publisher pubNoGroundCloud;
 
 /*** EKF inputs and output ***/
 MeasureGroup Measures;
@@ -2670,6 +2689,152 @@ void h_share_model(state_ikfom &s, esekfom::dyn_share_datastruct<double> &ekfom_
     solve_time += omp_get_wtime() - solve_start_;
 }
 
+/// @brief 地面点云分割：将当前帧点云分割为地面和非地面点云并发布
+void groundSegmentation()
+{
+    if (feats_undistort->empty())
+        return;
+
+    PointCloudXYZI::Ptr cloud_base(new PointCloudXYZI());
+    int cloudSize = feats_undistort->size();
+
+    // Step 1: 坐标变换到 base_link 系
+    // 若 enable_input_transform 为 true，点云已在 base_link 系（callback中已变换），直接使用
+    // 否则使用 Lidar -> base_link 外参进行变换
+    if (enable_input_transform)
+    {
+        cloud_base = feats_undistort;
+    }
+    else
+    {
+        cloud_base->resize(cloudSize);
+        Eigen::Affine3f T_base_lidar = Eigen::Affine3f::Identity();
+        T_base_lidar.matrix().block<3,3>(0,0) = Lidar_R_wrt_Baselink.cast<float>();
+        T_base_lidar.matrix().block<3,1>(0,3) = Lidar_T_wrt_Baselink.cast<float>();
+        pcl::transformPointCloud(*feats_undistort, *cloud_base, T_base_lidar);
+    }
+
+    // Step 2: 构建 seg_buf（候选地面点）和 up_buf（低处非地面点）
+    PointCloudXYZI::Ptr seg_buf(new PointCloudXYZI());
+    PointCloudXYZI::Ptr up_buf(new PointCloudXYZI());
+
+    for (int i = 0; i < cloud_base->size(); i++)
+    {
+        // 降采样
+        if (i % extra_ground_filter_num == 0)
+            continue;
+
+        const auto &p = cloud_base->points[i];
+
+        // 高于 clip_hight 的点跳过
+        if (p.z > clip_hight)
+            continue;
+
+        // 超出 XY 地面范围的点跳过
+        if (p.x > ground_distance || p.x < -ground_distance)
+            continue;
+        if (p.y > ground_distance || p.y < -ground_distance)
+            continue;
+
+        // z 在 (0, clip_hight) 范围的点归入低位障碍物
+        if (p.z > 0 && p.z < clip_hight)
+        {
+            up_buf->push_back(p);
+            continue;
+        }
+        else
+        {
+            seg_buf->push_back(p);
+        }
+    }
+
+    // Step 3: 在车辆周围生成虚拟地面点 (z = -base_link_hight)
+    for (float x_ = -min_distance_b; x_ < min_distance_f; x_ += 0.04f)
+    {
+        for (float y_ = -min_distance_r; y_ < min_distance_l; y_ += 0.04f)
+        {
+            PointType buf_;
+            buf_.x = x_;
+            buf_.y = y_;
+            buf_.z = -base_link_hight;
+            seg_buf->push_back(buf_);
+        }
+    }
+
+    // Step 4: 计算候选地面点法向量
+    pcl::NormalEstimationOMP<PointType, pcl::Normal> n;
+    pcl::PointCloud<pcl::Normal>::Ptr normals(new pcl::PointCloud<pcl::Normal>);
+    pcl::search::KdTree<PointType>::Ptr tree(new pcl::search::KdTree<PointType>());
+    n.setNumberOfThreads(numberOfCores);
+    n.setInputCloud(seg_buf);
+    n.setSearchMethod(tree);
+    n.setRadiusSearch(0.6);
+    n.compute(*normals);
+
+    // Step 5: RANSAC 平面分割
+    pcl::PointIndices::Ptr inliers(new pcl::PointIndices);
+    pcl::ModelCoefficients::Ptr coefficients(new pcl::ModelCoefficients);
+    pcl::SACSegmentationFromNormals<PointType, pcl::Normal> seg;
+    seg.setOptimizeCoefficients(true);
+    seg.setModelType(pcl::SACMODEL_NORMAL_PLANE);
+    seg.setNormalDistanceWeight(0.8);
+    seg.setMethodType(pcl::SAC_RANSAC);
+    seg.setMaxIterations(5);
+    seg.setDistanceThreshold(ground_distancethreshold);
+    seg.setInputCloud(seg_buf);
+    seg.setInputNormals(normals);
+    seg.segment(*inliers, *coefficients);
+
+    // Step 6: 提取地面和非地面点云
+    PointCloudXYZI::Ptr ground(new PointCloudXYZI());
+    PointCloudXYZI::Ptr no_ground(new PointCloudXYZI());
+    ground->resize(cloudSize);
+    no_ground->resize(cloudSize);
+
+    pcl::ExtractIndices<PointType> extract;
+    extract.setInputCloud(seg_buf);
+    extract.setIndices(inliers);
+    extract.setNegative(false);
+    extract.filter(*ground);
+    extract.setNegative(true);
+    extract.filter(*no_ground);
+
+    // 合并低位障碍物到非地面点云
+    *no_ground += *up_buf;
+
+    // Step 7: 空点云防护 (添加 sentinel 点避免 ros 发布错误)
+    // if (ground->size() == 0)
+    // {
+    //     PointType buf_;
+    //     buf_.x = 0; buf_.y = 0; buf_.z = 10;
+    //     ground->push_back(buf_);
+    // }
+    // if (no_ground->size() == 0)
+    // {
+    //     PointType buf_;
+    //     buf_.x = 0; buf_.y = 0; buf_.z = 10;
+    //     no_ground->push_back(buf_);
+    // }
+
+    // Step 8: 发布
+    ros::Time stamp = ros::Time().fromSec(lidar_end_time);
+
+    if (pubGroundCloud.getNumSubscribers() != 0)
+    {
+        sensor_msgs::PointCloud2 groundMsg;
+        pcl::toROSMsg(*ground, groundMsg);
+        groundMsg.header.stamp = stamp;
+        groundMsg.header.frame_id = base_linkFrame;
+        pubGroundCloud.publish(groundMsg);
+    }
+
+    sensor_msgs::PointCloud2 noGroundMsg;
+    pcl::toROSMsg(*no_ground, noGroundMsg);
+    noGroundMsg.header.stamp = stamp;
+    noGroundMsg.header.frame_id = base_linkFrame;
+    pubNoGroundCloud.publish(noGroundMsg);
+}
+
 int main(int argc, char **argv)
 {
     // allocateMemory();
@@ -2719,6 +2884,19 @@ int main(int argc, char **argv)
     nh.param<int>("point_filter_num", p_pre->point_filter_num, 2);
     nh.param<bool>("feature_extract_enable", p_pre->feature_enabled, false);
     nh.param<bool>("runtime_pos_log_enable", runtime_pos_log, 0);
+
+    // 地面分割参数
+    nh.param<bool>("ground_segmentation/enable", enable_ground_seg, false);
+    nh.param<float>("ground_segmentation/ground_distance", ground_distance, 3.75f);
+    nh.param<float>("ground_segmentation/clip_hight", clip_hight, 0.3f);
+    nh.param<float>("ground_segmentation/ground_distancethreshold", ground_distancethreshold, 0.2f);
+    nh.param<float>("ground_segmentation/base_link_hight", base_link_hight, 0.5f);
+    nh.param<float>("ground_segmentation/min_distance_f", min_distance_f, 0.05f);
+    nh.param<float>("ground_segmentation/min_distance_b", min_distance_b, 0.5f);
+    nh.param<float>("ground_segmentation/min_distance_l", min_distance_l, 0.25f);
+    nh.param<float>("ground_segmentation/min_distance_r", min_distance_r, 0.25f);
+    nh.param<int>("ground_segmentation/extra_ground_filter_num", extra_ground_filter_num, 2);
+
     nh.param<bool>("mapping/extrinsic_est_en", extrinsic_est_en, true);
     nh.param<bool>("pcd_save/pcd_save_en", pcd_save_en, false);
     nh.param<int>("pcd_save/interval", pcd_save_interval, -1);
@@ -2908,6 +3086,10 @@ int main(int argc, char **argv)
     pubGnssPath = nh.advertise<nav_msgs::Path>("gnss_path", 100000);
     pubLaserCloudSurround = nh.advertise<sensor_msgs::PointCloud2>("/x_nav/local_map", 1); // 发布局部关键帧map的特征点云
     pubOptimizedGlobalMap = nh.advertise<sensor_msgs::PointCloud2>("fast_lio_sam/mapping/map_global_optimized", 1); // 发布局部关键帧map的特征点云
+
+    // 地面分割Publisher
+    pubGroundCloud   = nh.advertise<sensor_msgs::PointCloud2>("/x_nav/current_pointcloud_ground", 100);
+    pubNoGroundCloud = nh.advertise<sensor_msgs::PointCloud2>("/x_nav/current_pointcloud_noground", 100);
 
     // loop clousre
     // 发布闭环匹配关键帧局部map
@@ -3118,6 +3300,13 @@ int main(int argc, char **argv)
             /******* Publish odometry *******/
             publish_odometry(pubOdomAftMapped);
             publish_current_velocity(pubCurrentVelocity);
+
+            /*** Ground Segmentation ***/
+            if (enable_ground_seg)
+            {
+                groundSegmentation();
+            }
+
             /*** add the feature points to map kdtree ***/
             t3 = omp_get_wtime();
             map_incremental();

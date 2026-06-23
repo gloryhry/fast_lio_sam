@@ -11,6 +11,19 @@ preprocess:
     scan_rate: 10                # only need to be set for velodyne, unit: Hz,
     blind: 0.3
 
+# 地面分割
+ground_segmentation:
+    enable: true                          # 是否启用地面点云分割
+    ground_distance: 3.75                  # 候选地面点XY范围 (m)
+    clip_hight: 0.3                        # 地面以上裁剪高度 (m)
+    ground_distancethreshold: 0.2          # RANSAC平面拟合距离阈值 (m)
+    base_link_hight: 0.5                   # base_link原点距真实地面高度 (m)
+    min_distance_f: 0.05                   # 前方虚拟地面点范围 (m)
+    min_distance_b: 0.5                    # 后方虚拟地面点范围 (m)
+    min_distance_l: 0.25                   # 左方虚拟地面点范围 (m)
+    min_distance_r: 0.25                   # 右方虚拟地面点范围 (m)
+    extra_ground_filter_num: 2             # 降采样间隔 (1/N个点用于分割)
+
 mapping:
     acc_cov: 0.1
     gyr_cov: 0.1
