@@ -299,6 +299,10 @@ float poseCovThreshold;       //  位姿协方差阈值  from isam2
 M3D Gnss_R_wrt_Lidar(Eye3d) ;         // gnss  与 imu 的外参
 V3D Gnss_T_wrt_Lidar(Zero3d);
 bool gnss_inited = false ;                        //  是否完成gnss初始化
+bool gnss_extrinsic_calibrated = false;           //  是否完成GNSS-LiDAR外参标定
+std::vector<std::pair<double, Eigen::Vector3d>> raw_gnss_enu_queue;  //  原始GNSS ENU位置(时间戳, 位置)
+int gnss_calib_min_match;                         //  最少匹配点对数
+double gnss_calib_max_time_diff;                  //  最大时间匹配容差
 shared_ptr<GnssProcess> p_gnss(new GnssProcess());
 GnssProcess gnss_data;
 ros::Publisher pubGnssPath ;
@@ -661,6 +665,130 @@ void addLoopFactor()
     aLoopIsClosed = true;
 }
 
+
+/**
+ * Umeyama 轨迹对齐 (Z轴约束): 仅求解绕Z轴的旋转(yaw) + 3D平移
+ * dst = R_z * src + t,  其中 R_z 只有 yaw 分量
+ */
+bool umeyamaAlignment(const std::vector<Eigen::Vector3d>& src,
+                      const std::vector<Eigen::Vector3d>& dst,
+                      Eigen::Matrix3d& R, Eigen::Vector3d& t)
+{
+    if (src.size() < 3 || src.size() != dst.size())
+        return false;
+
+    int n = src.size();
+
+    // 计算 2D 质心 (XY 平面)
+    Eigen::Vector2d src_centroid_2d = Eigen::Vector2d::Zero();
+    Eigen::Vector2d dst_centroid_2d = Eigen::Vector2d::Zero();
+    double src_z_sum = 0.0, dst_z_sum = 0.0;
+    for (int i = 0; i < n; ++i) {
+        src_centroid_2d += src[i].head<2>();
+        dst_centroid_2d += dst[i].head<2>();
+        src_z_sum += src[i].z();
+        dst_z_sum += dst[i].z();
+    }
+    src_centroid_2d /= n;
+    dst_centroid_2d /= n;
+
+    // 构建 2x2 协方差矩阵 H (仅 XY 平面)
+    Eigen::Matrix2d H = Eigen::Matrix2d::Zero();
+    for (int i = 0; i < n; ++i) {
+        Eigen::Vector2d src_d = src[i].head<2>() - src_centroid_2d;
+        Eigen::Vector2d dst_d = dst[i].head<2>() - dst_centroid_2d;
+        H += src_d * dst_d.transpose();
+    }
+
+    // SVD 分解 (2x2)
+    Eigen::JacobiSVD<Eigen::Matrix2d> svd(H, Eigen::ComputeFullU | Eigen::ComputeFullV);
+    Eigen::Matrix2d U = svd.matrixU();
+    Eigen::Matrix2d V = svd.matrixV();
+
+    // 计算 2D 旋转矩阵 (带反射修正)
+    Eigen::Matrix2d R_2d = V * U.transpose();
+    if (R_2d.determinant() < 0) {
+        Eigen::Matrix2d V_corrected = V;
+        V_corrected.col(1) *= -1.0;
+        R_2d = V_corrected * U.transpose();
+    }
+
+    // 由 R_2d 构造 R_z (绕Z轴旋转)
+    R = Eigen::Matrix3d::Identity();
+    R.block<2,2>(0,0) = R_2d;
+
+    // 平移: XY 由 2D 对齐, Z 独立 (仅平移不耦合旋转)
+    t.head<2>() = dst_centroid_2d - R_2d * src_centroid_2d;
+    t.z() = dst_z_sum / n - src_z_sum / n;
+
+    return true;
+}
+
+/**
+ * 使用 Umeyama 对齐 GNSS ENU 轨迹与 LiDAR SLAM 轨迹, 标定外参
+ */
+bool tryCalibrateExtrinsic()
+{
+    if (fastlio_unoptimized_cloudKeyPoses6D->points.empty() || raw_gnss_enu_queue.empty())
+        return false;
+
+    // 按时间戳匹配 GNSS 和 LiDAR 位置
+    std::vector<Eigen::Vector3d> lidar_positions;
+    std::vector<Eigen::Vector3d> gnss_positions;
+
+    for (const auto& gnss_pt : raw_gnss_enu_queue) {
+        double gnss_time = gnss_pt.first;
+        double min_diff = gnss_calib_max_time_diff;
+        int best_idx = -1;
+
+        for (size_t i = 0; i < fastlio_unoptimized_cloudKeyPoses6D->points.size(); ++i) {
+            double diff = std::abs(fastlio_unoptimized_cloudKeyPoses6D->points[i].time - gnss_time);
+            if (diff < min_diff) {
+                min_diff = diff;
+                best_idx = i;
+            }
+        }
+
+        if (best_idx >= 0) {
+            const auto& lidar_pt = fastlio_unoptimized_cloudKeyPoses6D->points[best_idx];
+            lidar_positions.push_back(Eigen::Vector3d(lidar_pt.x, lidar_pt.y, lidar_pt.z));
+            gnss_positions.push_back(gnss_pt.second);
+        }
+    }
+
+    if (lidar_positions.size() < (size_t)gnss_calib_min_match) {
+        ROS_INFO("GNSS calibration: %zu / %d matched pairs, waiting for more...",
+                 lidar_positions.size(), gnss_calib_min_match);
+        return false;
+    }
+
+    // Umeyama 对齐: P_enu = R_align * P_lidar + t_align
+    Eigen::Matrix3d R_align;
+    Eigen::Vector3d t_align;
+    if (!umeyamaAlignment(lidar_positions, gnss_positions, R_align, t_align)) {
+        ROS_WARN("Umeyama alignment failed");
+        return false;
+    }
+
+    // 转换为外参: P_lidar = Gnss_R_wrt_Lidar * P_enu + Gnss_T_wrt_Lidar
+    // R_align 将 LiDAR -> ENU, 所以 Gnss_R_wrt_Lidar = R_align^T
+    // t_align 将 LiDAR 原点表示在 ENU 中, 所以 Gnss_T_wrt_Lidar = -R_align^T * t_align
+    Gnss_R_wrt_Lidar = R_align.transpose();
+    Gnss_T_wrt_Lidar = -R_align.transpose() * t_align;
+
+    gnss_extrinsic_calibrated = true;
+
+    ROS_INFO("GNSS-LiDAR extrinsic calibrated via Umeyama (%zu pairs):", lidar_positions.size());
+    ROS_INFO("  R_gnss2lidar:\n%f %f %f\n%f %f %f\n%f %f %f",
+             Gnss_R_wrt_Lidar(0,0), Gnss_R_wrt_Lidar(0,1), Gnss_R_wrt_Lidar(0,2),
+             Gnss_R_wrt_Lidar(1,0), Gnss_R_wrt_Lidar(1,1), Gnss_R_wrt_Lidar(1,2),
+             Gnss_R_wrt_Lidar(2,0), Gnss_R_wrt_Lidar(2,1), Gnss_R_wrt_Lidar(2,2));
+    ROS_INFO("  t_gnss2lidar: %f %f %f", Gnss_T_wrt_Lidar(0), Gnss_T_wrt_Lidar(1), Gnss_T_wrt_Lidar(2));
+
+    raw_gnss_enu_queue.clear();  // 释放不再需要的数据
+    return true;
+}
+
 /**
  * 添加GPS因子
 */
@@ -715,24 +843,37 @@ void addGPSFactor()
             // (0,0,0)无效数据
             if (abs(gps_x) < 1e-6 && abs(gps_y) < 1e-6)
                 continue;
-            // 每隔5m添加一个GPS里程计
-            PointType curGPSPoint;
-            curGPSPoint.x = gps_x;
-            curGPSPoint.y = gps_y;
-            curGPSPoint.z = gps_z;
-            if (pointDistance(curGPSPoint, lastGPSPoint) < 5.0)
-                continue;
-            else
-                lastGPSPoint = curGPSPoint;
-            // 添加GPS因子
-            gtsam::Vector Vector3(3);
-            Vector3 << max(noise_x, 1.0f), max(noise_y, 1.0f), max(noise_z, 1.0f);
-            gtsam::noiseModel::Diagonal::shared_ptr gps_noise = gtsam::noiseModel::Diagonal::Variances(Vector3);
-            gtsam::GPSFactor gps_factor(cloudKeyPoses3D->size(), gtsam::Point3(gps_x, gps_y, gps_z), gps_noise);
-            gtSAMgraph.add(gps_factor);
-            aLoopIsClosed = true;
-            ROS_INFO("GPS Factor Added");
-            break;
+            
+            // 应用外参变换: 将 GNSS ENU 坐标转到 LiDAR 系
+            if (gnss_extrinsic_calibrated) {
+                Eigen::Vector3d P_enu(gps_x, gps_y, gps_z);
+                Eigen::Vector3d P_lidar = Gnss_R_wrt_Lidar * P_enu + Gnss_T_wrt_Lidar;
+                gps_x = P_lidar.x();
+                gps_y = P_lidar.y();
+                gps_z = P_lidar.z();
+            
+                // 每隔5m添加一个GPS里程计
+                PointType curGPSPoint;
+                curGPSPoint.x = gps_x;
+                curGPSPoint.y = gps_y;
+                curGPSPoint.z = gps_z;
+                if (pointDistance(curGPSPoint, lastGPSPoint) < 5.0)
+                    continue;
+                else
+                    lastGPSPoint = curGPSPoint;
+                // 添加GPS因子
+                gtsam::Vector Vector3(3);
+                Vector3 << max(noise_x, 1.0f), max(noise_y, 1.0f), max(noise_z, 1.0f);
+                gtsam::noiseModel::Diagonal::shared_ptr gps_noise = gtsam::noiseModel::Diagonal::Variances(Vector3);
+                gtsam::GPSFactor gps_factor(cloudKeyPoses3D->size(), gtsam::Point3(gps_x, gps_y, gps_z), gps_noise);
+                gtSAMgraph.add(gps_factor);
+                aLoopIsClosed = true;
+                ROS_INFO("GPS Factor Added");
+                break;
+            }
+            else{
+                break;
+            }
         }
     }
 }
@@ -745,6 +886,10 @@ void saveKeyFramesAndFactor()
     // 激光里程计因子(from fast-lio),  输入的是frame_relative pose  帧间位姿(body 系下)
     addOdomFactor();
     // GPS因子 (UTM -> WGS84)
+    // 若未标定外参，尝试通过 Umeyama 对齐 GPS 与 LiDAR 轨迹
+    if (!gnss_extrinsic_calibrated) {
+        tryCalibrateExtrinsic();
+    }
     addGPSFactor();
     // 闭环因子 (rs-loop-detect)  基于欧氏距离的检测
     addLoopFactor();
@@ -1497,6 +1642,12 @@ void gnss_cbk(const sensor_msgs::NavSatFixConstPtr& msg_in)
         gnss_data_enu.pose.covariance[14] = gnss_data.pose_cov[2] ;
 
         gnss_buffer.push_back(gnss_data_enu);
+        
+        // 存储原始 GNSS ENU 位置用于外参标定
+        if (!gnss_extrinsic_calibrated) {
+            raw_gnss_enu_queue.push_back(std::make_pair(gnss_data.time,
+                Eigen::Vector3d(gnss_data.local_E, gnss_data.local_N, gnss_data.local_U)));
+        }
 
         // visial gnss path in rviz:
         msg_gnss_pose.header.frame_id = rosNamespace + "camera_init";
@@ -1823,6 +1974,7 @@ void publish_path(const ros::Publisher pubPath)
         thisPose6D.roll = rot_ang(0) ;
         thisPose6D.pitch = rot_ang(1) ;
         thisPose6D.yaw = rot_ang(2) ;
+        thisPose6D.time = lidar_end_time;
         fastlio_unoptimized_cloudKeyPoses6D->push_back(thisPose6D);   
     }
 }
@@ -2387,6 +2539,8 @@ int main(int argc, char **argv)
     nh.param<bool>("useGpsElevation", useGpsElevation, false);
     nh.param<float>("gpsCovThreshold", gpsCovThreshold, 2.0);
     nh.param<float>("poseCovThreshold", poseCovThreshold, 25.0);
+    nh.param<int>("gnss_calib_min_match", gnss_calib_min_match, 50);
+    nh.param<double>("gnss_calib_max_time_diff", gnss_calib_max_time_diff, 0.5);
 
 
     // Visualization
