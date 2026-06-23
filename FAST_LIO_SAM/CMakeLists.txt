@@ -91,6 +91,7 @@ add_service_files(
   FILES
   save_map.srv
   save_pose.srv
+  nav_function.srv
 )
 
 generate_messages(

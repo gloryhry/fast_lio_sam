@@ -1,0 +1,18 @@
+string cmd               # 命令字符串：save_map, increase_map, load_map, get_map, change_*
+
+string set_value_string   # 字符串参数（如目录路径）
+float32 set_value_float32 # 浮点参数
+int32 set_value_int32     # 整型参数
+
+float32 x                 # 位姿位置 x
+float32 y                 # 位姿位置 y
+float32 z                 # 位姿位置 z
+float32 qx                # 位姿四元数 x
+float32 qy                # 位姿四元数 y
+float32 qz                # 位姿四元数 z
+float32 qw                # 位姿四元数 w
+bool no_align             # 是否跳过轨迹对齐
+
+---
+uint32 success            # 0 = 失败, 1 = 成功
+string return_msgs        # 返回消息（错误描述或状态信息）
