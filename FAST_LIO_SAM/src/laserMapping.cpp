@@ -294,6 +294,7 @@ string gnss_topic ;
 bool useImuHeadingInitialization;   
 bool useGpsElevation;             //  是否使用gps高层优化
 float gpsCovThreshold;          //   gps方向角和高度差的协方差阈值
+float gpsCovThreshold_Z;        //   gps Z(高程)方向协方差阈值
 float poseCovThreshold;       //  位姿协方差阈值  from isam2
 
 M3D Gnss_R_wrt_Lidar(Eye3d) ;         // gnss  与 imu 的外参
@@ -834,7 +835,7 @@ void addGPSFactor()
             float gps_x = thisGPS.pose.pose.position.x;
             float gps_y = thisGPS.pose.pose.position.y;
             float gps_z = thisGPS.pose.pose.position.z;
-            if (!useGpsElevation)           //  是否使用gps的高度
+            if (!useGpsElevation || noise_z > gpsCovThreshold_Z) //  是否使用gps的高度
             {
                 gps_z = transformTobeMapped[5];
                 noise_z = 0.01;
@@ -2538,6 +2539,7 @@ int main(int argc, char **argv)
     nh.param<bool>("useImuHeadingInitialization", useImuHeadingInitialization, false);
     nh.param<bool>("useGpsElevation", useGpsElevation, false);
     nh.param<float>("gpsCovThreshold", gpsCovThreshold, 2.0);
+    nh.param<float>("gpsCovThreshold_Z", gpsCovThreshold_Z, 200.0);
     nh.param<float>("poseCovThreshold", poseCovThreshold, 25.0);
     nh.param<int>("gnss_calib_min_match", gnss_calib_min_match, 50);
     nh.param<double>("gnss_calib_max_time_diff", gnss_calib_max_time_diff, 0.5);

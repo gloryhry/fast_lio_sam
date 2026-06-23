@@ -78,10 +78,11 @@ historyKeyframeFitnessScore: 0.3              # icp threshold, the smaller the b
 # GPS Settings
 useImuHeadingInitialization: true           # if using GPS data, set to "true"
 useGpsElevation: true                      # if GPS elevation is bad, set to "false"
-gpsCovThreshold: 2.0                        # m^2, threshold for using GPS data
+gpsCovThreshold: 0.001                        # m^2, threshold for using GPS data
+gpsCovThreshold_Z: 0.1                        # m^2, threshold for Z(elevation) GPS covariance
 poseCovThreshold: 25.0 #25.0                      # m^2, threshold for using GPS data  位姿协方差阈值 from isam2
-gnss_calib_min_match: 50
-gnss_calib_max_time_diff: 0.5
+gnss_calib_min_match: 50                     #   最少匹配点对数
+gnss_calib_max_time_diff: 0.5                #   最大时间匹配容差
 
 # gpsCovThreshold: 0.1                        # m^2, threshold for using GPS data
 # poseCovThreshold: 0.25 #25.0                      # m^2, threshold for using GPS data  位姿协方差阈值 from isam2
