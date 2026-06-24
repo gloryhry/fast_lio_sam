@@ -39,6 +39,7 @@
 #include <fstream>
 #include <csignal>
 #include <unistd.h>
+#include <filesystem>
 #include <Python.h>
 #include <so3_math.h>
 #include <ros/ros.h>
@@ -58,6 +59,7 @@
 #include <tf2_ros/static_transform_broadcaster.h>
 #include <geometry_msgs/Vector3.h>
 #include <geometry_msgs/Twist.h>
+#include <geometry_msgs/PoseWithCovarianceStamped.h>
 #include <livox_ros_driver/CustomMsg.h>
 #include "preprocess.h"
 #include <ikd-Tree/ikd_Tree.h>
@@ -359,8 +361,37 @@ float globalMapVisualizationLeafSize;
 ros::ServiceServer slam_service;
 ros::Publisher pub_slam_state;
 bool show_globalmap_flag = false;
-int slam_mode = 1; // 0: localization, 1: mapping (default)
+int slam_mode = 0; // 0: mapping, 1: localization (对齐 digitaltwins-x-nav)
 int last_saved_keyframe_index = -1;  // 增量保存追踪
+
+// ---- Localization 初始化状态机 (对齐 digitaltwins-x-nav) ----
+int initializedFlag = 0;                   // 0:等待初始位姿, 1:ICP匹配中, 2:初始化完成
+bool hand_init_state = false;              // 是否通过 /initialpose 手动初始化
+bool auto_localization_enableflag = false; // 启用GNSS自动初始化
+float initframe_FitnessScore = 0.1;        // ICP匹配分数阈值
+float localization_search_radius = 5.0;    // GNSS/手动初始化时的搜索半径(m)
+float localization_localmap_leafsize = 0.5;// 局部地图降采样leaf size
+float localization_icp_correspondence_dist = 100.0; // ICP对应点最大距离
+int   localization_icp_max_iters = 100;    // ICP最大迭代次数
+float safe_speed = 15.0;                   // localization模式下最大允许速度(m/s)
+int   localization_flag_vel = 0;           // 初始化完成后置1, Run()中重置速度基准
+
+// GNSS-关键帧关联 (用于auto-localization)
+struct GNSSKeyframeLink {
+    double gnss_x, gnss_y, gnss_z;
+    int keyframe_index;
+};
+std::vector<GNSSKeyframeLink> gnss_keyframe_links;
+pcl::KdTreeFLANN<PointType>::Ptr kdtreeGNSSKeyPoses(new pcl::KdTreeFLANN<PointType>());
+pcl::PointCloud<PointType>::Ptr gnssCloudKeyPoses3D(new pcl::PointCloud<PointType>());
+
+// 局部地图 (用于ICP初始化)
+pcl::PointCloud<PointType>::Ptr localizationLocalMap(new pcl::PointCloud<PointType>());
+int locMapCenterKfIdx = -1;               // 局部地图中心关键帧索引
+
+// 速度安全检测基准
+Eigen::Vector3d last_safe_position = Eigen::Vector3d::Zero();
+double last_safety_check_time = -1.0;
 
 
 // 获取ros namespace
@@ -773,6 +804,7 @@ bool umeyamaAlignment(const std::vector<Eigen::Vector3d>& src,
  */
 bool tryCalibrateExtrinsic()
 {
+    ROS_WARN("Use Umeyama to Align GNSS ENU and Lidar SLAM");
     if (fastlio_unoptimized_cloudKeyPoses6D->points.empty() || raw_gnss_enu_queue.empty())
         return false;
 
@@ -944,9 +976,9 @@ void saveKeyFramesAndFactor()
     {
         isam->update();
         isam->update();
-        isam->update();
-        isam->update();
-        isam->update();
+        // isam->update();
+        // isam->update();
+        // isam->update();
     }
     // update之后要清空一下保存的因子图，注：历史数据不会清掉，ISAM保存起来了
     gtSAMgraph.resize(0);
@@ -1301,7 +1333,7 @@ void performLoopClosure()
     // ICP Settings
     pcl::IterativeClosestPoint<PointType, PointType> icp;
     icp.setMaxCorrespondenceDistance(150); // giseop , use a value can cover 2*historyKeyframeSearchNum range in meter
-    icp.setMaximumIterations(100);
+    icp.setMaximumIterations(20);
     icp.setTransformationEpsilon(1e-6);
     icp.setEuclideanFitnessEpsilon(1e-6);
     icp.setRANSACIterations(0);
@@ -1542,6 +1574,13 @@ void lasermap_fov_segment()
     kdtree_delete_time = omp_get_wtime() - delete_begin;
 }
 
+// ---- Localization 初始化函数前向声明 ----
+void InitialPoseCallBack(const geometry_msgs::PoseWithCovarianceStamped::ConstPtr& msg);
+void buildLocalMapFromKeyframe(int center_idx);
+bool gnssAutoInit();
+void icpLocalizationInit(pcl::PointCloud<PointType>::Ptr scan_lidar_frame);
+void velocitySafetyCheck();
+
 void standard_pcl_cbk(const sensor_msgs::PointCloud2::ConstPtr &msg)
 {
     mtx_buffer.lock();
@@ -1582,12 +1621,268 @@ void standard_pcl_cbk(const sensor_msgs::PointCloud2::ConstPtr &msg)
         ptr = transformed_ptr;
     }
 
+    // 保存 lidar 系原始点云 (用于 localization ICP 初始化)
+    PointCloudXYZI::Ptr ptr_lidar_frame(new PointCloudXYZI());
+    pcl::copyPointCloud(*ptr, *ptr_lidar_frame);
+
+    // ---- Localization 初始化 ----
+    if (slam_mode == 1 && initializedFlag != 2)
+    {
+        if (initializedFlag == 0)
+        {
+            std_msgs::String sm;
+            sm.data = "3";
+            pub_slam_state.publish(sm);
+
+            if (auto_localization_enableflag && !hand_init_state)
+                gnssAutoInit();
+        }
+
+        if (initializedFlag == 1)
+            icpLocalizationInit(ptr_lidar_frame);
+    }
+
     lidar_buffer.push_back(ptr);
     time_buffer.push_back(msg->header.stamp.toSec());
     last_timestamp_lidar = msg->header.stamp.toSec();
     s_plot11[scan_count] = omp_get_wtime() - preprocess_start_time;
     mtx_buffer.unlock();
     sig_buffer.notify_all();
+}
+
+// ============================================================================
+// Localization 初始化函数 (对齐 digitaltwins-x-nav)
+// ============================================================================
+
+/**
+ * /initialpose 回调 — 手动设置初始位姿
+ */
+void InitialPoseCallBack(const geometry_msgs::PoseWithCovarianceStamped::ConstPtr& msg)
+{
+    if (slam_mode != 1 || initializedFlag != 0) return;
+
+    double ix = msg->pose.pose.position.x;
+    double iy = msg->pose.pose.position.y;
+    double iz = msg->pose.pose.position.z;
+    tf::Quaternion q(msg->pose.pose.orientation.x, msg->pose.pose.orientation.y,
+                     msg->pose.pose.orientation.z, msg->pose.pose.orientation.w);
+    double ir, ip, iyaw; tf::Matrix3x3(q).getRPY(ir, ip, iyaw);
+
+    if (cloudKeyPoses3D->points.empty())
+    {
+        ROS_WARN("[localization] No keyframes loaded, cannot set initial pose from /initialpose");
+        return;
+    }
+
+    PointType sp; sp.x = ix; sp.y = iy; sp.z = iz;
+    kdtreeSurroundingKeyPoses->setInputCloud(cloudKeyPoses3D);
+    std::vector<int> idx; std::vector<float> dist;
+    if (kdtreeSurroundingKeyPoses->radiusSearch(sp, localization_search_radius, idx, dist) == 0)
+    {
+        ROS_WARN("[localization] No keyframe within %.1fm of initial pose (%.1f, %.1f, %.1f)",
+                 localization_search_radius, ix, iy, iz);
+        return;
+    }
+    int best = idx[std::min_element(dist.begin(), dist.end()) - dist.begin()];
+    ROS_INFO("[localization] /initialpose: nearest KF=%d (dist=%.2fm), building local map", best, sqrt(dist[best]));
+
+    buildLocalMapFromKeyframe(best);
+
+    // 设置 EKF 初始状态
+    state_point.pos = V3D(cloudKeyPoses6D->points[best].x, cloudKeyPoses6D->points[best].y, cloudKeyPoses6D->points[best].z);
+    state_point.rot = EulerToQuat(cloudKeyPoses6D->points[best].roll, cloudKeyPoses6D->points[best].pitch, cloudKeyPoses6D->points[best].yaw);
+    state_point.vel.setZero();
+    kf.change_x(state_point);
+
+    hand_init_state = true;
+    initializedFlag = 1;
+
+    ROS_INFO("[localization] /initialpose accepted, entering ICP matching phase");
+}
+
+/**
+ * 以 center_idx 为中心构建局部地图 (用于ICP匹配)
+ */
+void buildLocalMapFromKeyframe(int center_idx)
+{
+    localizationLocalMap->clear();
+    locMapCenterKfIdx = center_idx;
+
+    int w = 10;  // ±10 关键帧窗口
+    int num_kfs = (int)surfCloudKeyFrames.size();
+    for (int i = center_idx - w; i <= center_idx + w; i++)
+    {
+        if (i < 0 || i >= num_kfs) continue;
+        *localizationLocalMap += *transformPointCloud(surfCloudKeyFrames[i], &cloudKeyPoses6D->points[i]);
+    }
+
+    pcl::PointCloud<PointType>::Ptr ds(new pcl::PointCloud<PointType>());
+    pcl::VoxelGrid<PointType> vf;
+    vf.setLeafSize(localization_localmap_leafsize, localization_localmap_leafsize, localization_localmap_leafsize);
+    vf.setInputCloud(localizationLocalMap);
+    vf.filter(*ds);
+    *localizationLocalMap = *ds;
+
+    ROS_INFO("[localization] Built local map: %zu pts around KF %d [range %d..%d]",
+             localizationLocalMap->size(), center_idx,
+             std::max(0, center_idx - w), std::min(num_kfs - 1, center_idx + w));
+}
+
+/**
+ * GNSS 自动初始化: 用当前 GNSS 位置在预存的关键帧-GNSS关联中搜索
+ */
+bool gnssAutoInit()
+{
+    if (gnss_buffer.empty() || gnssCloudKeyPoses3D->points.empty()) return false;
+    if (initializedFlag != 0) return false;
+
+    // 取最近 lidar时间 ±0.5s 内的 GNSS 数据
+    nav_msgs::Odometry latest;
+    bool found = false;
+    while (!gnss_buffer.empty())
+    {
+        double dt = gnss_buffer.front().header.stamp.toSec() - lidar_end_time;
+        if (dt < -0.5) { gnss_buffer.pop_front(); continue; }
+        if (dt > 0.5)  break;
+        latest = gnss_buffer.front();
+        gnss_buffer.pop_front();
+        found = true;
+    }
+    if (!found || abs(latest.pose.pose.position.x) < 1e-6) return false;
+
+    double gx = latest.pose.pose.position.x;
+    double gy = latest.pose.pose.position.y;
+    double gz = latest.pose.pose.position.z;
+
+    PointType sp; sp.x = gx; sp.y = gy; sp.z = gz;
+    kdtreeGNSSKeyPoses->setInputCloud(gnssCloudKeyPoses3D);
+    std::vector<int> idx; std::vector<float> dist;
+    if (kdtreeGNSSKeyPoses->radiusSearch(sp, localization_search_radius, idx, dist) == 0)
+    {
+        ROS_WARN("[localization] No GNSS-aligned keyframe within %.1fm of (%.1f, %.1f)",
+                 localization_search_radius, gx, gy);
+        return false;
+    }
+    int best = idx[std::min_element(dist.begin(), dist.end()) - dist.begin()];
+    int kf_idx = (int)gnssCloudKeyPoses3D->points[best].intensity;
+    ROS_INFO("[localization] GNSS auto-init: matched KF %d (dist=%.2fm)", kf_idx, sqrt(dist[best]));
+
+    buildLocalMapFromKeyframe(kf_idx);
+
+    state_point.pos = V3D(cloudKeyPoses6D->points[kf_idx].x, cloudKeyPoses6D->points[kf_idx].y, cloudKeyPoses6D->points[kf_idx].z);
+    state_point.rot = EulerToQuat(cloudKeyPoses6D->points[kf_idx].roll, cloudKeyPoses6D->points[kf_idx].pitch, cloudKeyPoses6D->points[kf_idx].yaw);
+    state_point.vel.setZero();
+    kf.change_x(state_point);
+
+    initializedFlag = 1;
+    return true;
+}
+
+/**
+ * ICP 匹配: 当前扫描 vs 局部地图
+ */
+void icpLocalizationInit(pcl::PointCloud<PointType>::Ptr scan_lidar_frame)
+{
+    if (localizationLocalMap->empty()) return;
+
+    // 降采样当前扫描
+    pcl::PointCloud<PointType>::Ptr scanDS(new pcl::PointCloud<PointType>());
+    downSizeFilterICP.setInputCloud(scan_lidar_frame);
+    downSizeFilterICP.filter(*scanDS);
+
+    // 转换到 world 系
+    pcl::PointCloud<PointType>::Ptr scanW(new pcl::PointCloud<PointType>());
+    scanW->resize(scanDS->size());
+    for (size_t i = 0; i < scanDS->size(); i++)
+        pointBodyToWorld(&scanDS->points[i], &scanW->points[i]);
+
+    // ICP 匹配
+    pcl::IterativeClosestPoint<PointType, PointType> icp;
+    icp.setMaxCorrespondenceDistance(localization_icp_correspondence_dist);
+    icp.setMaximumIterations(localization_icp_max_iters);
+    icp.setTransformationEpsilon(1e-6);
+    icp.setEuclideanFitnessEpsilon(1e-6);
+    icp.setRANSACIterations(0);
+    icp.setInputSource(scanW);
+    icp.setInputTarget(localizationLocalMap);
+    pcl::PointCloud<PointType>::Ptr unused(new pcl::PointCloud<PointType>());
+    icp.align(*unused);
+
+    float score = icp.getFitnessScore();
+
+    if (icp.hasConverged() && score < initframe_FitnessScore)
+    {
+        // ICP 成功 — 修正 EKF 状态
+        Eigen::Affine3f T_corr(icp.getFinalTransformation());
+        float x, y, z, roll, pitch, yaw;
+        pcl::getTranslationAndEulerAngles(T_corr, x, y, z, roll, pitch, yaw);
+
+        state_point.pos += V3D(x, y, z);
+        Eigen::Quaterniond qc(Eigen::AngleAxisd((double)yaw, V3D::UnitZ()) *
+                              Eigen::AngleAxisd((double)pitch, V3D::UnitY()) *
+                              Eigen::AngleAxisd((double)roll, V3D::UnitX()));
+        state_point.rot = state_point.rot * qc;
+        state_point.vel.setZero();
+        kf.change_x(state_point);
+
+        initializedFlag = 2;
+        localization_flag_vel = 1;
+        last_safe_position = state_point.pos;
+        last_safety_check_time = lidar_end_time;
+
+        std_msgs::String sm;
+        sm.data = "5#" + std::to_string(score);
+        pub_slam_state.publish(sm);
+
+        ROS_INFO("[localization] ICP init SUCCESS: score=%.6f < threshold=%.6f", score, initframe_FitnessScore);
+    }
+    else
+    {
+        std_msgs::String sm;
+        char buf[64];
+        snprintf(buf, sizeof(buf), "4#%.4f", score);
+        sm.data = buf;
+        pub_slam_state.publish(sm);
+
+        ROS_INFO("[localization] ICP attempt: score=%.6f (threshold=%.6f), retrying...",
+                 score, initframe_FitnessScore);
+    }
+}
+
+/**
+ * 速度安全检测 (localization 模式专用)
+ */
+void velocitySafetyCheck()
+{
+    if (slam_mode != 1 || localization_flag_vel != 1) return;
+
+    double dt = lidar_end_time - last_safety_check_time;
+    if (dt <= 0.0 || dt > 1.0)
+    {
+        last_safety_check_time = lidar_end_time;
+        last_safe_position = state_point.pos;
+        return;
+    }
+
+    double speed = (state_point.pos - last_safe_position).norm() / dt;
+
+    if (speed > safe_speed)
+    {
+        state_point.pos = last_safe_position;
+        state_point.vel.setZero();
+        kf.change_x(state_point);
+
+        std_msgs::String sm;
+        sm.data = "-1#" + std::to_string(speed);
+        pub_slam_state.publish(sm);
+
+        ROS_WARN("[localization] Speed safety violation: %.2f > %.2f m/s, resetting EKF", speed, safe_speed);
+    }
+    else
+    {
+        last_safe_position = state_point.pos;
+        last_safety_check_time = lidar_end_time;
+    }
 }
 
 double timediff_lidar_wrt_imu = 0.0;
@@ -1645,6 +1940,27 @@ void livox_pcl_cbk(const livox_ros_driver::CustomMsg::ConstPtr &msg)
         }
 
         ptr = transformed_ptr;
+    }
+
+    // 保存 lidar 系原始点云 (用于 localization ICP 初始化)
+    PointCloudXYZI::Ptr ptr_lidar_frame(new PointCloudXYZI());
+    pcl::copyPointCloud(*ptr, *ptr_lidar_frame);
+
+    // ---- Localization 初始化 ----
+    if (slam_mode == 1 && initializedFlag != 2)
+    {
+        if (initializedFlag == 0)
+        {
+            std_msgs::String sm;
+            sm.data = "3";
+            pub_slam_state.publish(sm);
+
+            if (auto_localization_enableflag && !hand_init_state)
+                gnssAutoInit();
+        }
+
+        if (initializedFlag == 1)
+            icpLocalizationInit(ptr_lidar_frame);
     }
 
     lidar_buffer.push_back(ptr); //储存处理后的lidar特征
@@ -2927,15 +3243,31 @@ bool savemap_to_dir_incremental(std::string save_dir)
 }
 
 /**
+ * 设置 SLAM 模式 (对齐 digitaltwins-x-nav 启动逻辑)
+ */
+void Set_mapping()
+{
+    slam_mode = 0;
+}
+
+void Set_localization()
+{
+    slam_mode = 1;
+    initializedFlag = 0;
+    hand_init_state = false;
+    localization_flag_vel = 0;
+}
+
+/**
  * 从目录加载地图 (localization 模式)
  * 读取 poses_gps_align.txt 和逐帧 PCD, 重建 ISAM2 因子图和 ikd-Tree
  */
 bool load_map(std::string load_dir)
 {
-    if (slam_mode != 0)
+    if (slam_mode != 1)
     {
-        ROS_WARN("load_map: only available in localization mode (slam_mode=0), current slam_mode=%d", slam_mode);
-        // return false;
+        ROS_ERROR("load_map: only available in localization mode (slam_mode=1), current slam_mode=%d", slam_mode);
+        return false;
     }
 
     // 1. 读取位姿文件
@@ -2995,17 +3327,17 @@ bool load_map(std::string load_dir)
             break;
         }
 
-        // 加载 ground/obs (可选)
-        pcl::PointCloud<PointType>::Ptr ground_cloud(new pcl::PointCloud<PointType>());
-        pcl::PointCloud<PointType>::Ptr noground_cloud(new pcl::PointCloud<PointType>());
+        // // 加载 ground/obs (可选)
+        // pcl::PointCloud<PointType>::Ptr ground_cloud(new pcl::PointCloud<PointType>());
+        // pcl::PointCloud<PointType>::Ptr noground_cloud(new pcl::PointCloud<PointType>());
 
-        std::string ground_path = load_dir + "/ground/" + std::to_string(i) + ".pcd";
-        std::string obs_path = load_dir + "/obs/" + std::to_string(i) + ".pcd";
-        struct stat st;
-        if (stat(ground_path.c_str(), &st) == 0)
-            pcl::io::loadPCDFile(ground_path, *ground_cloud);
-        if (stat(obs_path.c_str(), &st) == 0)
-            pcl::io::loadPCDFile(obs_path, *noground_cloud);
+        // std::string ground_path = load_dir + "/ground/" + std::to_string(i) + ".pcd";
+        // std::string obs_path = load_dir + "/obs/" + std::to_string(i) + ".pcd";
+        // struct stat st;
+        // if (stat(ground_path.c_str(), &st) == 0)
+        //     pcl::io::loadPCDFile(ground_path, *ground_cloud);
+        // if (stat(obs_path.c_str(), &st) == 0)
+        //     pcl::io::loadPCDFile(obs_path, *noground_cloud);
 
         // 添加关键帧位姿
         PointType thisPose3D;
@@ -3031,11 +3363,11 @@ bool load_map(std::string load_dir)
 
         // 添加关键帧点云
         surfCloudKeyFrames.push_back(surf_cloud);
-        if (!ground_cloud->empty() || !noground_cloud->empty())
-        {
-            groundCloudKeyFrames.push_back(ground_cloud);
-            nogroundCloudKeyFrames.push_back(noground_cloud);
-        }
+        // if (!ground_cloud->empty() || !noground_cloud->empty())
+        // {
+        //     groundCloudKeyFrames.push_back(ground_cloud);
+        //     nogroundCloudKeyFrames.push_back(noground_cloud);
+        // }
 
         // 更新可视化路径
         updatePath(thisPose6D);
@@ -3044,6 +3376,49 @@ bool load_map(std::string load_dir)
     }
 
     ROS_INFO("load_map: loaded %d keyframes", loaded_count);
+
+    // 3.5 加载 GNSS 关键帧关联数据 (用于 auto-localization)
+    gnss_keyframe_links.clear();
+    gnssCloudKeyPoses3D->clear();
+    {
+        std::string gf = load_dir + "/poses_gps_raw.txt";
+        std::ifstream ifs_gnss(gf);
+        if (ifs_gnss.is_open())
+        {
+            std::string gl;
+            while (std::getline(ifs_gnss, gl))
+            {
+                if (gl.empty()) continue;
+                std::istringstream gss(gl);
+                double gt, gx, gy, gz, gqx, gqy, gqz, gqw;
+                if (gss >> gt >> gx >> gy >> gz >> gqx >> gqy >> gqz >> gqw)
+                {
+                    int nk = -1; double md = 1.0;
+                    for (int k = 0; k < loaded_count; k++)
+                    {
+                        double d = std::abs(cloudKeyPoses6D->points[k].time - gt);
+                        if (d < md) { md = d; nk = k; }
+                    }
+                    if (nk >= 0)
+                    {
+                        PointType gp;
+                        gp.x = gx; gp.y = gy; gp.z = gz; gp.intensity = nk;
+                        gnssCloudKeyPoses3D->push_back(gp);
+                        gnss_keyframe_links.push_back({gx, gy, gz, nk});
+                    }
+                }
+            }
+            ifs_gnss.close();
+            if (!gnssCloudKeyPoses3D->empty())
+                kdtreeGNSSKeyPoses->setInputCloud(gnssCloudKeyPoses3D);
+            ROS_INFO("load_map: %zu GNSS-keyframe links loaded for auto-localization",
+                     gnssCloudKeyPoses3D->points.size());
+        }
+        else
+        {
+            ROS_WARN("load_map: no %s, auto-localization disabled", gf.c_str());
+        }
+    }
 
     // 4. 重置 ISAM2 并重建因子图
     delete isam;
@@ -3092,21 +3467,75 @@ bool load_map(std::string load_dir)
     gtSAMgraph.resize(0);
     initialEstimate.clear();
 
-    // 5. 重建 ikd-Tree
+    // 5. 重建 ikd-Tree（模拟 mapping 模式增量构建过程）
+    // Step 5a: 设置降采样参数，与 mapping 模式 line 4169 一致
+    ikdtree.set_downsample_param(filter_size_map_min);
+
+    // Step 5b: 创建逐帧体素降采样过滤器
+    // 模拟每帧 downSizeFilterSurf.filter()（line 4159-4160）
+    // 在 lidar 系下降采样（与 mapping 模式一致），再转换到 world 系
+    pcl::VoxelGrid<PointType> frame_voxel_filter;
+    frame_voxel_filter.setLeafSize(filter_size_surf_min, filter_size_surf_min, filter_size_surf_min);
+
+    // 用于可视化的全局地图点云（发布原始未过滤点云转换到 world 系）
     pcl::PointCloud<PointType>::Ptr ikdtree_points(new pcl::PointCloud<PointType>());
+
+    bool first_frame = true;
+    int total_added = 0;
+
     for (int i = 0; i < loaded_count; i++)
     {
+        // 收集全局可视化点云（原始点云转换到 world 系）
         *ikdtree_points += *transformPointCloud(surfCloudKeyFrames[i], &cloudKeyPoses6D->points[i]);
+
+        // Step 5c: 在 lidar 系下体素降采样（模拟 mapping 模式的 downSizeFilterSurf）
+        pcl::PointCloud<PointType>::Ptr frame_filtered(new pcl::PointCloud<PointType>());
+        frame_voxel_filter.setInputCloud(surfCloudKeyFrames[i]);
+        frame_voxel_filter.filter(*frame_filtered);
+
+        if (frame_filtered->empty()) continue;
+
+        // Step 5d: 转换到 world 系
+        pcl::PointCloud<PointType>::Ptr frame_world =
+            transformPointCloud(frame_filtered, &cloudKeyPoses6D->points[i]);
+
+        // Step 5e: 增量构建 ikd-Tree
+        if (first_frame)
+        {
+            // 第一帧用 Build() 初始化（与 mapping 模式 line 4176 一致）
+            if (frame_world->size() > 5)
+            {
+                ikdtree.Build(frame_world->points);
+                first_frame = false;
+            }
+        }
+        else
+        {
+            // 后续帧用 Add_Points + 降采样（与 mapping 模式 map_incremental line 2243 一致）
+            total_added += ikdtree.Add_Points(frame_world->points, true);
+        }
     }
-    if (!ikdtree_points->empty())
+
+    if (first_frame && !ikdtree_points->empty())
     {
-        ikdtree.reconstruct(ikdtree_points->points);
-        ROS_INFO("load_map: ikd-Tree reconstructed with %zu points", ikdtree_points->size());
+        // 回退：如果没有任何一帧满足 Build 阈值条件，使用全量 Build
+        ROS_WARN("load_map: no single frame met Build threshold (>5 pts), using filtered global Build");
+        pcl::PointCloud<PointType>::Ptr filtered_all(new pcl::PointCloud<PointType>());
+        frame_voxel_filter.setInputCloud(ikdtree_points);
+        frame_voxel_filter.filter(*filtered_all);
+        ikdtree.reconstruct(filtered_all->points);
     }
+
+    ROS_INFO("load_map: ikd-Tree reconstructed — %d keyframes, %d points added via Add_Points",
+             loaded_count, total_added);
 
     // 6. 发布加载后的路径和状态
     ros::Time stamp = ros::Time().fromSec(lidar_end_time);
-    publishCloud(&pubOptimizedGlobalMap, ikdtree_points, stamp, odometryFrame);
+    PointVector().swap(ikdtree.PCL_Storage);
+    ikdtree.flatten(ikdtree.Root_Node, ikdtree.PCL_Storage, NOT_RECORD);
+    featsFromMap->clear();
+    featsFromMap->points = ikdtree.PCL_Storage;
+    publishCloud(&pubOptimizedGlobalMap, featsFromMap, stamp, odometryFrame);
 
     std_msgs::String state_msg;
     state_msg.data = "0";
@@ -3185,6 +3614,12 @@ bool CallbackFrom_slam_service(fast_lio_sam::nav_functionRequest& req, fast_lio_
         {
             res.success = 0;
             res.return_msgs = "load_map: set_value_string (directory) is required";
+            return true;
+        }
+        if (slam_mode != 1)
+        {
+            res.success = 0;
+            res.return_msgs = "load_map: must be in localization mode (slam_mode=1), current mode is mapping";
             return true;
         }
         bool ok = load_map(load_dir);
@@ -3268,6 +3703,38 @@ bool CallbackFrom_slam_service(fast_lio_sam::nav_functionRequest& req, fast_lio_
         return true;
     }
 
+    // ---- "set_mapping" ----
+    if (req.cmd == "set_mapping")
+    {
+        Set_mapping();
+        res.success = 1;
+        res.return_msgs = "Switched to mapping mode (slam_mode=0)";
+        return true;
+    }
+
+    // ---- "set_localization" ----
+    if (req.cmd == "set_localization")
+    {
+        Set_localization();
+        if (!req.set_value_string.empty())
+        {
+            bool ok = load_map(req.set_value_string);
+            if (!ok)
+            {
+                res.success = 0;
+                res.return_msgs = "set_localization: load_map failed for " + req.set_value_string;
+                return true;
+            }
+            res.return_msgs = "Switched to localization mode (slam_mode=1), map loaded: " + req.set_value_string;
+        }
+        else
+        {
+            res.return_msgs = "Switched to localization mode (slam_mode=1), no map loaded (use load_map after)";
+        }
+        res.success = 1;
+        return true;
+    }
+
     // 未知命令
     res.success = 0;
     res.return_msgs = "unknown cmd: " + req.cmd;
@@ -3277,6 +3744,65 @@ bool CallbackFrom_slam_service(fast_lio_sam::nav_functionRequest& req, fast_lio_
 
 int main(int argc, char **argv)
 {
+    // ---- 命令行参数解析 (对齐 digitaltwins-x-nav x_slam.cc 启动逻辑) ----
+    if (argc != 2 && argc != 3 && argc != 4)
+    {
+        std::cerr << "Usage: " << argv[0] << " <mapping|localization> [map_dir1] [map_dir2]" << std::endl;
+        return 1;
+    }
+
+    std::string run_mode = argv[1];
+    if (run_mode != "mapping" && run_mode != "localization")
+    {
+        std::cerr << "Invalid mode: " << run_mode << ". Must be 'mapping' or 'localization'." << std::endl;
+        return 1;
+    }
+
+    int load_map_num = argc - 2;
+    std::string map_dir1, map_dir2;
+
+    if (run_mode == "localization")
+    {
+        if (argc != 3 && argc != 4)
+        {
+            std::cerr << "Localization mode requires 1 or 2 map directories." << std::endl;
+            return 1;
+        }
+
+        // 验证地图目录存在且非空 (对齐 x_slam.cc:33-72)
+        for (int i = 2; i < argc; i++)
+        {
+            std::string dir = argv[i];
+            bool isEmpty = true;
+            try
+            {
+                for (const auto& entry : std::filesystem::directory_iterator(dir))
+                {
+                    if (std::filesystem::is_regular_file(entry.path()))
+                    {
+                        isEmpty = false;
+                        break;
+                    }
+                }
+            }
+            catch (const std::filesystem::filesystem_error& e)
+            {
+                std::cerr << "Failed to access directory: " << dir << " - " << e.what() << std::endl;
+                return 1;
+            }
+            if (isEmpty)
+            {
+                std::cerr << "Map directory is empty: " << dir << std::endl;
+                return 1;
+            }
+        }
+
+        map_dir1 = argv[2];
+        if (load_map_num == 2)
+            map_dir2 = argv[3];
+    }
+
+    // 原有初始化代码
     // allocateMemory();
     for (int i = 0; i < 6; ++i)
     {
@@ -3415,6 +3941,14 @@ int main(int argc, char **argv)
     nh.param<int>("gnss_calib_min_match", gnss_calib_min_match, 50);
     nh.param<double>("gnss_calib_max_time_diff", gnss_calib_max_time_diff, 0.5);
 
+    // ---- Localization 初始化参数 (对齐 digitaltwins-x-nav) ----
+    nh.param<bool>("localization/auto_localization_enable", auto_localization_enableflag, false);
+    nh.param<float>("localization/initframe_FitnessScore", initframe_FitnessScore, 0.1);
+    nh.param<float>("localization/search_radius", localization_search_radius, 5.0);
+    nh.param<float>("localization/localmap_leafsize", localization_localmap_leafsize, 0.5);
+    nh.param<float>("localization/icp_correspondence_dist", localization_icp_correspondence_dist, 100.0);
+    nh.param<int>("localization/icp_max_iters", localization_icp_max_iters, 100);
+    nh.param<float>("localization/safe_speed", safe_speed, 15.0);
 
     // Visualization
     nh.param<float>("globalMapVisualizationSearchRadius", globalMapVisualizationSearchRadius, 1e3);
@@ -3587,10 +4121,27 @@ int main(int argc, char **argv)
 
     // gnss
     ros::Subscriber sub_gnss = nh.subscribe(gnss_topic, 200000, gnss_cbk);
-    
+
+    // initialpose 订阅 (localization 模式手动初始化)
+    ros::Subscriber sub_initialpose = nh.subscribe("/initialpose", 10, InitialPoseCallBack);
+
     // slam service: 统一的 slam service 接口
     slam_service = nh.advertiseService("/x_nav/slam/service", &CallbackFrom_slam_service);
     pub_slam_state = nh.advertise<std_msgs::String>("/x_nav/slam/state", 10);
+
+    // ---- 设置 SLAM 模式 (对齐 digitaltwins-x-nav x_slam.cc:82-91) ----
+    if (run_mode == "localization")
+    {
+        Set_localization();
+        if (load_map_num == 1)
+            load_map(map_dir1);
+        else if (load_map_num == 2)
+            load_map(map_dir2);
+    }
+    else  // mapping
+    {
+        Set_mapping();
+    }
 
     // 回环检测线程
     std::thread loopthread(&loopClosureThread);
@@ -3604,6 +4155,19 @@ int main(int argc, char **argv)
         if (flg_exit)
             break;
         ros::spinOnce();
+
+        // localization 模式下周期性发布等待状态
+        if (slam_mode == 1 && initializedFlag == 0)
+        {
+            static ros::Time last_state_pub(0);
+            if ((ros::Time::now() - last_state_pub).toSec() > 0.5)
+            {
+                std_msgs::String sm;
+                sm.data = "3";
+                pub_slam_state.publish(sm);
+                last_state_pub = ros::Time::now();
+            }
+        }
 
         /// 在Measure内，储存当前lidar数据及lidar扫描时间内对应的imu数据序列
         if (sync_packages(Measures))
@@ -3641,8 +4205,9 @@ int main(int argc, char **argv)
             // 检查当前lidar数据时间，与最早lidar数据时间是否足够
             flg_EKF_inited = (Measures.lidar_beg_time - first_lidar_time) < INIT_TIME ? false : true;
 
-            /*** Segment the map in lidar FOV ***/
-            lasermap_fov_segment(); // 根据lidar在W系下的位置，重新确定局部地图的包围盒角点，移除远端的点
+            /*** Segment the map in lidar FOV (mapping mode only) ***/
+            if (slam_mode == 0)
+                lasermap_fov_segment(); // 根据lidar在W系下的位置，重新确定局部地图的包围盒角点，移除远端的点
 
             /*** downsample the feature points in a scan ***/
             downSizeFilterSurf.setInputCloud(feats_undistort);
@@ -3724,22 +4289,29 @@ int main(int argc, char **argv)
             }
 
             /*back end*/
-            // 1.计算当前帧与前一帧位姿变换，如果变化太小，不设为关键帧，反之设为关键帧
-            // 2.添加激光里程计因子、GPS因子、闭环因子
-            // 3.执行因子图优化
-            // 4.得到当前帧优化后的位姿，位姿协方差
-            // 5.添加cloudKeyPoses3D，cloudKeyPoses6D，更新transformTobeMapped，添加当前关键帧的地面/非地面/平面点集合
-            saveKeyFramesAndFactor();
-            // 更新因子图中所有变量节点的位姿，也就是所有历史关键帧的位姿，更新里程计轨迹， 重构ikdtree
-            correctPoses();
+            // mapping 模式: 保存关键帧 + 因子图优化 + 增长ikd-Tree
+            // localization 模式: 仅使用EKF跟踪，不保存关键帧、不增长地图
+            // if (slam_mode == 0)
+            // {
+                saveKeyFramesAndFactor();
+                correctPoses();
+                t3 = omp_get_wtime();
+                map_incremental();
+                t5 = omp_get_wtime();
+            // }
+            // else
+            // {
+            //     t3 = omp_get_wtime();
+            //     t5 = omp_get_wtime();
+            // }
+
             /******* Publish odometry *******/
             publish_odometry(pubOdomAftMapped);
             publish_current_velocity(pubCurrentVelocity);
 
-            /*** add the feature points to map kdtree ***/
-            t3 = omp_get_wtime();
-            map_incremental();
-            t5 = omp_get_wtime();
+            // ---- Localization 速度安全检测 ----
+            if (slam_mode == 1 && initializedFlag == 2)
+                velocitySafetyCheck();
             /******* Publish points *******/
             if (path_en){
                 publish_path(pubPath);
