@@ -3019,6 +3019,23 @@ bool savemap_to_dir(std::string save_dir)
     pose_unoptimized.close();
     pose_gnss.close();
 
+    // 保存 GNSS 参数 (原点 + 外参)
+    {
+        std::ofstream gnss_params;
+        gnss_params.open(save_dir + "/gnss_params.txt", std::ios::out);
+        gnss_params << std::fixed << std::setprecision(9);
+        gnss_params << gnss_data.origin_latitude  << " "
+                    << gnss_data.origin_longitude << " "
+                    << gnss_data.origin_altitude  << "\n";
+        for (int r = 0; r < 3; ++r)
+            for (int c = 0; c < 3; ++c)
+                gnss_params << Gnss_R_wrt_Lidar(r, c) << (r == 2 && c == 2 ? "\n" : " ");
+        gnss_params << Gnss_T_wrt_Lidar(0) << " "
+                    << Gnss_T_wrt_Lidar(1) << " "
+                    << Gnss_T_wrt_Lidar(2) << "\n";
+        gnss_params.close();
+    }
+
     // 构建并保存全局地面地图 (如有ground数据)
     if (!groundCloudKeyFrames.empty())
     {
@@ -3199,6 +3216,23 @@ bool savemap_to_dir_incremental(std::string save_dir)
         pose_optimized.close();
         pose_unoptimized.close();
         pose_gnss.close();
+
+        // 保存 GNSS 参数 (原点 + 外参)
+        {
+            std::ofstream gnss_params;
+            gnss_params.open(save_dir + "/gnss_params.txt", std::ios::out);
+            gnss_params << std::fixed << std::setprecision(9);
+            gnss_params << gnss_data.origin_latitude  << " "
+                        << gnss_data.origin_longitude << " "
+                        << gnss_data.origin_altitude  << "\n";
+            for (int r = 0; r < 3; ++r)
+                for (int c = 0; c < 3; ++c)
+                    gnss_params << Gnss_R_wrt_Lidar(r, c) << (r == 2 && c == 2 ? "\n" : " ");
+            gnss_params << Gnss_T_wrt_Lidar(0) << " "
+                        << Gnss_T_wrt_Lidar(1) << " "
+                        << Gnss_T_wrt_Lidar(2) << "\n";
+            gnss_params.close();
+        }
     }
 
     // 重建全局地图
@@ -3417,6 +3451,41 @@ bool load_map(std::string load_dir)
         else
         {
             ROS_WARN("load_map: no %s, auto-localization disabled", gf.c_str());
+        }
+    }
+
+    // 3.6 恢复 GNSS 参数 (原点 + 外参)
+    {
+        std::string gnss_param_file = load_dir + "/gnss_params.txt";
+        std::ifstream ifs_gnss_params(gnss_param_file);
+        if (ifs_gnss_params.is_open())
+        {
+            double lat, lon, alt;
+            if (ifs_gnss_params >> lat >> lon >> alt)
+            {
+                // 仅在原点非平凡时恢复 (避免全零默认值覆盖)
+                if (fabs(lat) > 1e-9 || fabs(lon) > 1e-9 || fabs(alt) > 1e-9)
+                {
+                    gnss_data.InitOriginPosition(lat, lon, alt);
+                    gnss_inited = true;
+                    ROS_INFO("load_map: GNSS origin restored (lat=%.9f, lon=%.9f, alt=%.9f)", lat, lon, alt);
+                }
+            }
+            M3D R_loaded;
+            V3D T_loaded;
+            for (int r = 0; r < 3; ++r)
+                for (int c = 0; c < 3; ++c)
+                    ifs_gnss_params >> R_loaded(r, c);
+            ifs_gnss_params >> T_loaded(0) >> T_loaded(1) >> T_loaded(2);
+            Gnss_R_wrt_Lidar = R_loaded;
+            Gnss_T_wrt_Lidar = T_loaded;
+            gnss_extrinsic_calibrated = true;
+            ROS_INFO("load_map: GNSS extrinsic restored");
+            ifs_gnss_params.close();
+        }
+        else
+        {
+            ROS_WARN("load_map: %s not found, GNSS params not restored", gnss_param_file.c_str());
         }
     }
 
@@ -3744,6 +3813,9 @@ bool CallbackFrom_slam_service(fast_lio_sam::nav_functionRequest& req, fast_lio_
 
 int main(int argc, char **argv)
 {
+    // ---- ros::init 必须在参数解析之前，以便移除ROS自动添加的 __name/__log 等参数 ----
+    ros::init(argc, argv, "laserMapping");
+
     // ---- 命令行参数解析 (对齐 digitaltwins-x-nav x_slam.cc 启动逻辑) ----
     if (argc != 2 && argc != 3 && argc != 4)
     {
@@ -3809,7 +3881,6 @@ int main(int argc, char **argv)
         transformTobeMapped[i] = 0;
     }
 
-    ros::init(argc, argv, "laserMapping");
     ros::NodeHandle nh,private_nh("~");
     
     nh.param<std::string>("tf_prefix", rosNamespace, "");
