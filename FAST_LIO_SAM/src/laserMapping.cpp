@@ -35,8 +35,13 @@
 #include <omp.h>
 #include <mutex>
 #include <atomic>
+#include <condition_variable>
+#include <cstdint>
+#include <deque>
 #include <math.h>
+#include <memory>
 #include <thread>
+#include <utility>
 #include <fstream>
 #include <csignal>
 #include <unistd.h>
@@ -177,7 +182,7 @@ PointCloudXYZI::Ptr current_noground_cloud(new PointCloudXYZI());  // 当前帧�
 pcl::VoxelGrid<PointType> downSizeFilterSurf; //单帧内降采样使用voxel grid
 pcl::VoxelGrid<PointType> downSizeFilterMap;  //未使用
 
-KD_TREE ikdtree;
+std::shared_ptr<KD_TREE> ikdtree(new KD_TREE());
 
 V3F XAxisPoint_body(LIDAR_SP_LEN, 0.0, 0.0);
 V3F XAxisPoint_world(LIDAR_SP_LEN, 0.0, 0.0);
@@ -245,6 +250,55 @@ pcl::PointCloud<PointType>::Ptr cloudKeyPoses3D(new pcl::PointCloud<PointType>()
 pcl::PointCloud<PointTypePose>::Ptr cloudKeyPoses6D(new pcl::PointCloud<PointTypePose>()); // 历史关键帧位姿
 pcl::PointCloud<PointType>::Ptr copy_cloudKeyPoses3D(new pcl::PointCloud<PointType>());
 pcl::PointCloud<PointTypePose>::Ptr copy_cloudKeyPoses6D(new pcl::PointCloud<PointTypePose>());
+
+struct IKdTreeMutation
+{
+    enum Type
+    {
+        ADD_POINTS,
+        DELETE_BOXES
+    } type;
+
+    uint64_t seq = 0;
+    PointVector points_downsample;
+    PointVector points_no_downsample;
+    std::vector<BoxPointType> boxes;
+};
+
+struct AsyncIKdTreeRebuildRequest
+{
+    uint64_t request_id = 0;
+    uint64_t base_mutation_seq = 0;
+    uint64_t tree_epoch = 0;
+    pcl::PointCloud<PointType>::Ptr key_poses_3d;
+    pcl::PointCloud<PointTypePose>::Ptr key_poses_6d;
+    std::vector<pcl::PointCloud<PointType>::Ptr> surf_keyframes;
+};
+
+struct AsyncIKdTreeRebuildResult
+{
+    uint64_t request_id = 0;
+    uint64_t base_mutation_seq = 0;
+    uint64_t tree_epoch = 0;
+    std::shared_ptr<KD_TREE> tree;
+    int validnum = 0;
+    int tree_size = 0;
+};
+
+std::mutex ikdtree_async_mtx;
+std::condition_variable ikdtree_async_cv;
+bool ikdtree_async_shutdown = false;
+bool ikdtree_request_pending = false;
+bool ikdtree_rebuild_in_progress = false;
+bool ikdtree_result_ready = false;
+bool ikdtree_rebuild_deferred = false;
+uint64_t ikdtree_next_request_id = 0;
+uint64_t ikdtree_mutation_seq = 0;
+uint64_t ikdtree_tree_epoch = 0;
+AsyncIKdTreeRebuildRequest ikdtree_pending_request;
+AsyncIKdTreeRebuildResult ikdtree_pending_result;
+std::deque<IKdTreeMutation> ikdtree_mutation_log;
+std::deque<std::shared_ptr<KD_TREE>> ikdtree_retired_trees;
 
 pcl::PointCloud<PointTypePose>::Ptr fastlio_unoptimized_cloudKeyPoses6D(new pcl::PointCloud<PointTypePose>()); //  存储fastlio 未优化的位姿
 pcl::PointCloud<PointTypePose>::Ptr gnss_cloudKeyPoses6D(new pcl::PointCloud<PointTypePose>()); //  gnss 轨迹
@@ -450,8 +504,9 @@ pcl::PointCloud<PointType>::Ptr transformPointCloud(pcl::PointCloud<PointType>::
     Eigen::Isometry3d  T_w_lidar  =  T_w_b * T_b_lidar  ;           //  T_w_lidar  转换矩阵
 
     Eigen::Isometry3d transCur = T_w_lidar;        
-
+#ifdef MP_EN
 #pragma omp parallel for num_threads(numberOfCores)
+#endif
     for (int i = 0; i < cloudSize; ++i)
     {
         const auto &pointFrom = cloudIn->points[i];
@@ -948,17 +1003,20 @@ void addGPSFactor()
                 gtSAMgraph.add(gps_factor);
                 aLoopIsClosed = true;
                 ROS_INFO("GPS Factor Added");
-                break;
+                return;
             }
             else{
                 break;
             }
         }
     }
+    return;
 }
 
 void saveKeyFramesAndFactor()
 {
+    double t0,t1,t2,t3,t4,t5;
+    t0 = omp_get_wtime();
     //  计算当前帧与前一帧位姿变换，如果变化太小，不设为关键帧，反之设为关键帧
     if (saveFrame() == false)
         return;
@@ -973,16 +1031,18 @@ void saveKeyFramesAndFactor()
     // 闭环因子 (rs-loop-detect)  基于欧氏距离的检测
     addLoopFactor();
     // 执行优化
+    t1 = omp_get_wtime();
     isam->update(gtSAMgraph, initialEstimate);
     isam->update();
     if (aLoopIsClosed == true) // 有回环因子，多update几次
     {
         isam->update();
         isam->update();
-        // isam->update();
-        // isam->update();
-        // isam->update();
+        isam->update();
+        isam->update();
+        isam->update();
     }
+    t2 = omp_get_wtime();
     // update之后要清空一下保存的因子图，注：历史数据不会清掉，ISAM保存起来了
     gtSAMgraph.resize(0);
     initialEstimate.clear();
@@ -1050,6 +1110,8 @@ void saveKeyFramesAndFactor()
     // cornerCloudKeyFrames.push_back(thisCornerKeyFrame);
     surfCloudKeyFrames.push_back(thisSurfKeyFrame);
 
+    t3 = omp_get_wtime();
+
     // 保存当前帧地面/非地面点云关键帧
     if (enable_ground_seg)
     {
@@ -1062,58 +1124,354 @@ void saveKeyFramesAndFactor()
     }
 
     updatePath(thisPose6D); //  可视化update后的path
+
+    t4 = omp_get_wtime();
+    if (runtime_pos_log)
+    {
+        std::cout << "saveKeyFramesAndFactor Time: " << t1-t0 << " | " << t2-t1 << " | " 
+                    << t3-t2 << " | " << " | " << t4-t3 << " all: " << t4-t0 << std::endl; 
+
+    }
 }
 
-void recontructIKdTree(){
-    if(recontructKdTree  &&  updateKdtreeCount >  0){
-        /*** if path is too large, the rvis will crash ***/
-        pcl::KdTreeFLANN<PointType>::Ptr kdtreeGlobalMapPoses(new pcl::KdTreeFLANN<PointType>());
-        pcl::PointCloud<PointType>::Ptr subMapKeyPoses(new pcl::PointCloud<PointType>());
-        pcl::PointCloud<PointType>::Ptr subMapKeyPosesDS(new pcl::PointCloud<PointType>());
-        pcl::PointCloud<PointType>::Ptr subMapKeyFrames(new pcl::PointCloud<PointType>());
-        pcl::PointCloud<PointType>::Ptr subMapKeyFramesDS(new pcl::PointCloud<PointType>());
+void recordIKdTreeAddMutation(const PointVector &points_downsample, const PointVector &points_no_downsample)
+{
+    if (points_downsample.empty() && points_no_downsample.empty())
+        return;
 
-        // kdtree查找最近一帧关键帧相邻的关键帧集合
-        std::vector<int> pointSearchIndGlobalMap;
-        std::vector<float> pointSearchSqDisGlobalMap;
-        mtx.lock();
-        kdtreeGlobalMapPoses->setInputCloud(cloudKeyPoses3D);
-        kdtreeGlobalMapPoses->radiusSearch(cloudKeyPoses3D->back(), globalMapVisualizationSearchRadius, pointSearchIndGlobalMap, pointSearchSqDisGlobalMap, 0);
-        mtx.unlock();
+    std::lock_guard<std::mutex> lock(ikdtree_async_mtx);
+    ++ikdtree_mutation_seq;
+    if (!ikdtree_request_pending && !ikdtree_rebuild_in_progress && !ikdtree_result_ready)
+        return;
 
-        for (int i = 0; i < (int)pointSearchIndGlobalMap.size(); ++i)
-            subMapKeyPoses->push_back(cloudKeyPoses3D->points[pointSearchIndGlobalMap[i]]);     //  subMap的pose集合
-        // 降采样
-        pcl::VoxelGrid<PointType> downSizeFilterSubMapKeyPoses;
-        downSizeFilterSubMapKeyPoses.setLeafSize(globalMapVisualizationPoseDensity, globalMapVisualizationPoseDensity, globalMapVisualizationPoseDensity); // for global map visualization
-        downSizeFilterSubMapKeyPoses.setInputCloud(subMapKeyPoses);
-        downSizeFilterSubMapKeyPoses.filter(*subMapKeyPosesDS);         //  subMap poses  downsample
-        // 提取局部相邻关键帧对应的特征点云
-        for (int i = 0; i < (int)subMapKeyPosesDS->size(); ++i)
-        {
-            // 距离过大
-            if (pointDistance(subMapKeyPosesDS->points[i], cloudKeyPoses3D->back()) > globalMapVisualizationSearchRadius)
-                    continue;
-            int thisKeyInd = (int)subMapKeyPosesDS->points[i].intensity;
-            // *globalMapKeyFrames += *transformPointCloud(cornerCloudKeyFrames[thisKeyInd],  &cloudKeyPoses6D->points[thisKeyInd]);
-            *subMapKeyFrames += *transformPointCloud(surfCloudKeyFrames[thisKeyInd], &cloudKeyPoses6D->points[thisKeyInd]); //  fast_lio only use  surfCloud
-        }
-        // 降采样，发布
-        pcl::VoxelGrid<PointType> downSizeFilterGlobalMapKeyFrames;                                                                                   // for global map visualization
-        downSizeFilterGlobalMapKeyFrames.setLeafSize(globalMapVisualizationLeafSize, globalMapVisualizationLeafSize, globalMapVisualizationLeafSize); // for global map visualization
-        downSizeFilterGlobalMapKeyFrames.setInputCloud(subMapKeyFrames);
-        downSizeFilterGlobalMapKeyFrames.filter(*subMapKeyFramesDS);
+    IKdTreeMutation mutation;
+    mutation.type = IKdTreeMutation::ADD_POINTS;
+    mutation.seq = ikdtree_mutation_seq;
+    mutation.points_downsample = points_downsample;
+    mutation.points_no_downsample = points_no_downsample;
+    ikdtree_mutation_log.push_back(std::move(mutation));
+}
 
-        std::cout << "subMapKeyFramesDS sizes  =  "   << subMapKeyFramesDS->points.size()  << std::endl;
-        
-        ikdtree.reconstruct(subMapKeyFramesDS->points);
-        updateKdtreeCount = 0;
-        ROS_INFO("Reconstructed  ikdtree ");
-        int featsFromMapNum = ikdtree.validnum();
-        kdtree_size_st = ikdtree.size();
-        std::cout << "featsFromMapNum  =  "   << featsFromMapNum   <<  "\t" << " kdtree_size_st   =  "  <<  kdtree_size_st  << std::endl;
+void recordIKdTreeDeleteMutation(const std::vector<BoxPointType> &boxes)
+{
+    if (boxes.empty())
+        return;
+
+    std::lock_guard<std::mutex> lock(ikdtree_async_mtx);
+    ++ikdtree_mutation_seq;
+    if (!ikdtree_request_pending && !ikdtree_rebuild_in_progress && !ikdtree_result_ready)
+        return;
+
+    IKdTreeMutation mutation;
+    mutation.type = IKdTreeMutation::DELETE_BOXES;
+    mutation.seq = ikdtree_mutation_seq;
+    mutation.boxes = boxes;
+    ikdtree_mutation_log.push_back(std::move(mutation));
+}
+
+AsyncIKdTreeRebuildResult buildAsyncIKdTreeFromSnapshot(const AsyncIKdTreeRebuildRequest &request)
+{
+    AsyncIKdTreeRebuildResult result;
+    result.request_id = request.request_id;
+    result.base_mutation_seq = request.base_mutation_seq;
+    result.tree_epoch = request.tree_epoch;
+    result.tree.reset(new KD_TREE());
+    result.tree->set_downsample_param(filter_size_map_min);
+
+    if (!request.key_poses_3d || request.key_poses_3d->empty() || !request.key_poses_6d)
+        return result;
+
+    pcl::KdTreeFLANN<PointType>::Ptr kdtreeGlobalMapPoses(new pcl::KdTreeFLANN<PointType>());
+    pcl::PointCloud<PointType>::Ptr subMapKeyPoses(new pcl::PointCloud<PointType>());
+    pcl::PointCloud<PointType>::Ptr subMapKeyPosesDS(new pcl::PointCloud<PointType>());
+    pcl::PointCloud<PointType>::Ptr subMapKeyFrames(new pcl::PointCloud<PointType>());
+    pcl::PointCloud<PointType>::Ptr subMapKeyFramesDS(new pcl::PointCloud<PointType>());
+
+    std::vector<int> pointSearchIndGlobalMap;
+    std::vector<float> pointSearchSqDisGlobalMap;
+    kdtreeGlobalMapPoses->setInputCloud(request.key_poses_3d);
+    kdtreeGlobalMapPoses->radiusSearch(request.key_poses_3d->back(), globalMapVisualizationSearchRadius,
+                                       pointSearchIndGlobalMap, pointSearchSqDisGlobalMap, 0);
+
+    for (int i = 0; i < (int)pointSearchIndGlobalMap.size(); ++i)
+        subMapKeyPoses->push_back(request.key_poses_3d->points[pointSearchIndGlobalMap[i]]);
+
+    pcl::VoxelGrid<PointType> downSizeFilterSubMapKeyPoses;
+    downSizeFilterSubMapKeyPoses.setLeafSize(globalMapVisualizationPoseDensity,
+                                             globalMapVisualizationPoseDensity,
+                                             globalMapVisualizationPoseDensity);
+    downSizeFilterSubMapKeyPoses.setInputCloud(subMapKeyPoses);
+    downSizeFilterSubMapKeyPoses.filter(*subMapKeyPosesDS);
+
+    for (int i = 0; i < (int)subMapKeyPosesDS->size(); ++i)
+    {
+        if (pointDistance(subMapKeyPosesDS->points[i], request.key_poses_3d->back()) > globalMapVisualizationSearchRadius)
+            continue;
+
+        int thisKeyInd = (int)subMapKeyPosesDS->points[i].intensity;
+        if (thisKeyInd < 0 || thisKeyInd >= (int)request.surf_keyframes.size() ||
+            thisKeyInd >= (int)request.key_poses_6d->size() || request.surf_keyframes[thisKeyInd] == nullptr)
+            continue;
+
+        *subMapKeyFrames += *transformPointCloud(request.surf_keyframes[thisKeyInd],
+                                                 &request.key_poses_6d->points[thisKeyInd]);
     }
-        updateKdtreeCount ++ ; 
+
+    pcl::VoxelGrid<PointType> downSizeFilterGlobalMapKeyFrames;
+    downSizeFilterGlobalMapKeyFrames.setLeafSize(globalMapVisualizationLeafSize,
+                                                 globalMapVisualizationLeafSize,
+                                                 globalMapVisualizationLeafSize);
+    downSizeFilterGlobalMapKeyFrames.setInputCloud(subMapKeyFrames);
+    downSizeFilterGlobalMapKeyFrames.filter(*subMapKeyFramesDS);
+
+    if (!subMapKeyFramesDS->empty())
+        result.tree->Build(subMapKeyFramesDS->points);
+
+    result.validnum = result.tree->validnum();
+    result.tree_size = result.tree->size();
+    ROS_INFO("Async ikd-tree rebuild finished: request=%lu points=%zu valid=%d size=%d",
+             (unsigned long)result.request_id, subMapKeyFramesDS->points.size(), result.validnum, result.tree_size);
+    return result;
+}
+
+bool queueAsyncIKdTreeRebuildFromCurrentMap()
+{
+    if (cloudKeyPoses3D->points.empty())
+        return false;
+
+    AsyncIKdTreeRebuildRequest request;
+    request.key_poses_3d.reset(new pcl::PointCloud<PointType>(*cloudKeyPoses3D));
+    request.key_poses_6d.reset(new pcl::PointCloud<PointTypePose>(*cloudKeyPoses6D));
+    request.surf_keyframes = surfCloudKeyFrames;
+
+    {
+        std::lock_guard<std::mutex> lock(ikdtree_async_mtx);
+        if (ikdtree_request_pending || ikdtree_rebuild_in_progress)
+        {
+            ikdtree_rebuild_deferred = true;
+            return false;
+        }
+
+        request.request_id = ++ikdtree_next_request_id;
+        request.base_mutation_seq = ikdtree_mutation_seq;
+        request.tree_epoch = ikdtree_tree_epoch;
+        ikdtree_pending_request = std::move(request);
+        ikdtree_request_pending = true;
+        ikdtree_rebuild_in_progress = true;
+    }
+
+    ikdtree_async_cv.notify_one();
+    ROS_INFO("Async ikd-tree rebuild requested");
+    return true;
+}
+
+void recontructIKdTree()
+{
+    if (recontructKdTree && updateKdtreeCount > 0)
+    {
+        queueAsyncIKdTreeRebuildFromCurrentMap();
+        updateKdtreeCount = 0;
+    }
+    updateKdtreeCount++;
+}
+
+void retireIKdTreeOnWorker(std::shared_ptr<KD_TREE> tree)
+{
+    if (!tree)
+        return;
+
+    {
+        std::lock_guard<std::mutex> lock(ikdtree_async_mtx);
+        ikdtree_retired_trees.push_back(std::move(tree));
+    }
+    ikdtree_async_cv.notify_one();
+}
+
+void replayIKdTreeMutations(KD_TREE &tree, const std::vector<IKdTreeMutation> &mutations)
+{
+    for (const auto &mutation : mutations)
+    {
+        if (mutation.type == IKdTreeMutation::DELETE_BOXES)
+        {
+            std::vector<BoxPointType> boxes = mutation.boxes;
+            tree.Delete_Point_Boxes(boxes);
+        }
+        else
+        {
+            PointVector points_downsample = mutation.points_downsample;
+            PointVector points_no_downsample = mutation.points_no_downsample;
+            if (!points_downsample.empty())
+                tree.Add_Points(points_downsample, true);
+            if (!points_no_downsample.empty())
+                tree.Add_Points(points_no_downsample, false);
+        }
+    }
+}
+
+void tryInstallAsyncIKdTreeRebuild()
+{
+    AsyncIKdTreeRebuildResult result;
+    std::vector<IKdTreeMutation> mutations_to_replay;
+    bool start_deferred_rebuild = false;
+
+    {
+        std::lock_guard<std::mutex> lock(ikdtree_async_mtx);
+        if (!ikdtree_result_ready)
+            return;
+
+        result = std::move(ikdtree_pending_result);
+        ikdtree_result_ready = false;
+
+        if (!result.tree || result.tree_epoch != ikdtree_tree_epoch)
+        {
+            if (result.tree)
+            {
+                ikdtree_retired_trees.push_back(result.tree);
+                result.tree.reset();
+            }
+            start_deferred_rebuild = ikdtree_rebuild_deferred;
+            ikdtree_rebuild_deferred = false;
+        }
+        else
+        {
+            for (const auto &mutation : ikdtree_mutation_log)
+            {
+                if (mutation.seq > result.base_mutation_seq)
+                    mutations_to_replay.push_back(mutation);
+            }
+        }
+    }
+
+    if (!result.tree || result.tree_epoch != ikdtree_tree_epoch)
+    {
+        if (start_deferred_rebuild)
+            queueAsyncIKdTreeRebuildFromCurrentMap();
+        ikdtree_async_cv.notify_one();
+        return;
+    }
+
+    replayIKdTreeMutations(*result.tree, mutations_to_replay);
+
+    {
+        std::lock_guard<std::mutex> lock(ikdtree_async_mtx);
+        if (result.tree_epoch != ikdtree_tree_epoch)
+        {
+            ikdtree_retired_trees.push_back(result.tree);
+            result.tree.reset();
+            start_deferred_rebuild = ikdtree_rebuild_deferred;
+            ikdtree_rebuild_deferred = false;
+        }
+        else
+        {
+            std::shared_ptr<KD_TREE> old_tree = ikdtree;
+            ikdtree = result.tree;
+            ikdtree_tree_epoch++;
+            ikdtree_mutation_log.clear();
+            kdtree_size_st = ikdtree->size();
+            ikdtree_retired_trees.push_back(std::move(old_tree));
+            start_deferred_rebuild = ikdtree_rebuild_deferred;
+            ikdtree_rebuild_deferred = false;
+            ROS_INFO("Async ikd-tree rebuild installed: request=%lu replayed=%zu valid=%d size=%d",
+                     (unsigned long)result.request_id, mutations_to_replay.size(),
+                     ikdtree->validnum(), ikdtree->size());
+        }
+    }
+
+    ikdtree_async_cv.notify_one();
+    if (start_deferred_rebuild)
+        queueAsyncIKdTreeRebuildFromCurrentMap();
+}
+
+void invalidateAsyncIKdTreeRebuilds()
+{
+    std::shared_ptr<KD_TREE> stale_result;
+    {
+        std::lock_guard<std::mutex> lock(ikdtree_async_mtx);
+        ikdtree_tree_epoch++;
+        ikdtree_request_pending = false;
+        ikdtree_result_ready = false;
+        ikdtree_rebuild_deferred = false;
+        ikdtree_mutation_log.clear();
+        stale_result = ikdtree_pending_result.tree;
+        ikdtree_pending_result = AsyncIKdTreeRebuildResult();
+    }
+
+    retireIKdTreeOnWorker(stale_result);
+}
+
+void asyncIKdTreeRebuildThread()
+{
+    while (ros::ok())
+    {
+        AsyncIKdTreeRebuildRequest request;
+        std::deque<std::shared_ptr<KD_TREE>> retired_trees;
+        bool has_request = false;
+
+        {
+            std::unique_lock<std::mutex> lock(ikdtree_async_mtx);
+            ikdtree_async_cv.wait(lock, [] {
+                return ikdtree_async_shutdown || ikdtree_request_pending || !ikdtree_retired_trees.empty();
+            });
+
+            retired_trees.swap(ikdtree_retired_trees);
+
+            if (ikdtree_async_shutdown)
+            {
+                ikdtree_request_pending = false;
+                ikdtree_rebuild_in_progress = false;
+                break;
+            }
+
+            if (ikdtree_request_pending)
+            {
+                request = std::move(ikdtree_pending_request);
+                ikdtree_pending_request = AsyncIKdTreeRebuildRequest();
+                ikdtree_request_pending = false;
+                has_request = true;
+            }
+        }
+
+        retired_trees.clear();
+
+        if (!has_request)
+            continue;
+
+        AsyncIKdTreeRebuildResult result = buildAsyncIKdTreeFromSnapshot(request);
+
+        {
+            std::lock_guard<std::mutex> lock(ikdtree_async_mtx);
+            if (ikdtree_async_shutdown)
+            {
+                ikdtree_rebuild_in_progress = false;
+                ikdtree_retired_trees.push_back(result.tree);
+            }
+            else
+            {
+                if (ikdtree_result_ready && ikdtree_pending_result.tree)
+                    ikdtree_retired_trees.push_back(ikdtree_pending_result.tree);
+                ikdtree_pending_result = std::move(result);
+                ikdtree_result_ready = true;
+                ikdtree_rebuild_in_progress = false;
+            }
+        }
+        ikdtree_async_cv.notify_all();
+    }
+
+    std::deque<std::shared_ptr<KD_TREE>> retired_trees;
+    {
+        std::lock_guard<std::mutex> lock(ikdtree_async_mtx);
+        retired_trees.swap(ikdtree_retired_trees);
+    }
+    retired_trees.clear();
+}
+
+void stopAsyncIKdTreeRebuildThread()
+{
+    {
+        std::lock_guard<std::mutex> lock(ikdtree_async_mtx);
+        ikdtree_async_shutdown = true;
+    }
+    ikdtree_async_cv.notify_all();
 }
 
 // Forward declaration for helper used in correctPoses()
@@ -1502,7 +1860,7 @@ void RGBpointBodyLidarToIMU(PointType const *const pi, PointType *const po)
 void points_cache_collect()
 {
     PointVector points_history;
-    ikdtree.acquire_removed_points(points_history);
+    ikdtree->acquire_removed_points(points_history);
     for (int i = 0; i < points_history.size(); i++)
         _featsArray->push_back(points_history[i]);
 }
@@ -1573,7 +1931,10 @@ void lasermap_fov_segment()
     points_cache_collect();
     double delete_begin = omp_get_wtime();
     if (cub_needrm.size() > 0)
-        kdtree_delete_counter = ikdtree.Delete_Point_Boxes(cub_needrm);
+    {
+        kdtree_delete_counter = ikdtree->Delete_Point_Boxes(cub_needrm);
+        recordIKdTreeDeleteMutation(cub_needrm);
+    }
     kdtree_delete_time = omp_get_wtime() - delete_begin;
 }
 
@@ -2386,8 +2747,9 @@ void map_incremental()
     }
 
     double st_time = omp_get_wtime();
-    add_point_size = ikdtree.Add_Points(PointToAdd, true); //加入点时需要降采样
-    ikdtree.Add_Points(PointNoNeedDownsample, false);      //加入点时不需要降采样
+    add_point_size = ikdtree->Add_Points(PointToAdd, true); //加入点时需要降采样
+    ikdtree->Add_Points(PointNoNeedDownsample, false);      //加入点时不需要降采样
+    recordIKdTreeAddMutation(PointToAdd, PointNoNeedDownsample);
     add_point_size = PointToAdd.size() + PointNoNeedDownsample.size();
     kdtree_incremental_time = omp_get_wtime() - st_time;
 }
@@ -2789,6 +3151,7 @@ void h_share_model(state_ikfom &s, esekfom::dyn_share_datastruct<double> &ekfom_
     laserCloudOri->clear();
     corr_normvect->clear();
     total_residual = 0.0;
+    std::shared_ptr<KD_TREE> active_ikdtree = ikdtree;
 
 /** closest surface search and residual computation **/
 #ifdef MP_EN
@@ -2816,7 +3179,7 @@ void h_share_model(state_ikfom &s, esekfom::dyn_share_datastruct<double> &ekfom_
         {
             /** Find the closest surfaces in the map **/
             // world系下从ikdtree找5个最近点用于平面拟合
-            ikdtree.Nearest_Search(point_world, NUM_MATCH_POINTS, points_near, pointSearchSqDis);
+            active_ikdtree->Nearest_Search(point_world, NUM_MATCH_POINTS, points_near, pointSearchSqDis);
             //最近点数大于NUM_MATCH_POINTS，且最大距离小于等于5,point_selected_surf设置为true
             point_selected_surf[i] = points_near.size() < NUM_MATCH_POINTS ? false : pointSearchSqDis[NUM_MATCH_POINTS - 1] > 5 ? false
                                                                                                                                 : true;
@@ -3710,9 +4073,11 @@ bool load_map(std::string load_dir)
     gtSAMgraph.resize(0);
     initialEstimate.clear();
 
+    invalidateAsyncIKdTreeRebuilds();
+
     // 5. 重建 ikd-Tree（模拟 mapping 模式增量构建过程）
     // Step 5a: 设置降采样参数，与 mapping 模式 line 4169 一致
-    ikdtree.set_downsample_param(filter_size_map_min);
+    ikdtree->set_downsample_param(filter_size_map_min);
 
     // Step 5b: 创建逐帧体素降采样过滤器
     // 模拟每帧 downSizeFilterSurf.filter()（line 4159-4160）
@@ -3748,14 +4113,14 @@ bool load_map(std::string load_dir)
             // 第一帧用 Build() 初始化（与 mapping 模式 line 4176 一致）
             if (frame_world->size() > 5)
             {
-                ikdtree.Build(frame_world->points);
+                ikdtree->Build(frame_world->points);
                 first_frame = false;
             }
         }
         else
         {
             // 后续帧用 Add_Points + 降采样（与 mapping 模式 map_incremental line 2243 一致）
-            total_added += ikdtree.Add_Points(frame_world->points, true);
+            total_added += ikdtree->Add_Points(frame_world->points, true);
         }
     }
 
@@ -3766,7 +4131,7 @@ bool load_map(std::string load_dir)
         pcl::PointCloud<PointType>::Ptr filtered_all(new pcl::PointCloud<PointType>());
         frame_voxel_filter.setInputCloud(ikdtree_points);
         frame_voxel_filter.filter(*filtered_all);
-        ikdtree.reconstruct(filtered_all->points);
+        ikdtree->reconstruct(filtered_all->points);
     }
 
     ROS_INFO("load_map: ikd-Tree reconstructed — %d keyframes, %d points added via Add_Points",
@@ -3774,10 +4139,10 @@ bool load_map(std::string load_dir)
 
     // 6. 发布加载后的路径和状态
     ros::Time stamp = ros::Time().fromSec(lidar_end_time);
-    PointVector().swap(ikdtree.PCL_Storage);
-    ikdtree.flatten(ikdtree.Root_Node, ikdtree.PCL_Storage, NOT_RECORD);
+    PointVector().swap(ikdtree->PCL_Storage);
+    ikdtree->flatten(ikdtree->Root_Node, ikdtree->PCL_Storage, NOT_RECORD);
     featsFromMap->clear();
-    featsFromMap->points = ikdtree.PCL_Storage;
+    featsFromMap->points = ikdtree->PCL_Storage;
     publishCloud(&pubOptimizedGlobalMap, featsFromMap, stamp, odometryFrame);
 
     std_msgs::String state_msg;
@@ -4392,6 +4757,7 @@ int main(int argc, char **argv)
 
     // 回环检测线程
     std::thread loopthread(&loopClosureThread);
+    std::thread ikdtreeRebuildThread(&asyncIKdTreeRebuildThread);
 
     //------------------------------------------------------------------------------------------------------
     signal(SIGINT, SigHandle);
@@ -4463,23 +4829,23 @@ int main(int argc, char **argv)
             feats_down_size = feats_down_body->points.size(); //当前帧降采样后点数
 
             /*** initialize the map kdtree ***/
-            if (ikdtree.Root_Node == nullptr)
+            if (ikdtree->Root_Node == nullptr)
             {
                 if (feats_down_size > 5)
                 {
-                    ikdtree.set_downsample_param(filter_size_map_min);
+                    ikdtree->set_downsample_param(filter_size_map_min);
                     feats_down_world->resize(feats_down_size);
                     for (int i = 0; i < feats_down_size; i++)
                     {
                         pointBodyToWorld(&(feats_down_body->points[i]), &(feats_down_world->points[i])); // point转到world系下
                     }
                     // world系下对当前帧降采样后的点云，初始化lkd-tree
-                    ikdtree.Build(feats_down_world->points);
+                    ikdtree->Build(feats_down_world->points);
                 }
                 continue;
             }
-            int featsFromMapNum = ikdtree.validnum();
-            kdtree_size_st = ikdtree.size();
+            int featsFromMapNum = ikdtree->validnum();
+            kdtree_size_st = ikdtree->size();
 
             // cout<<"[ mapping ]: In num: "<<feats_undistort->points.size()<<" downsamp "<<feats_down_size<<" Map num: "<<featsFromMapNum<<"effect num:"<<effct_feat_num<<endl;
 
@@ -4500,10 +4866,10 @@ int main(int argc, char **argv)
 
             if (visulize_IkdtreeMap) // If you need to see map point, change to "if(1)"
             {
-                PointVector().swap(ikdtree.PCL_Storage);
-                ikdtree.flatten(ikdtree.Root_Node, ikdtree.PCL_Storage, NOT_RECORD);
+                PointVector().swap(ikdtree->PCL_Storage);
+                ikdtree->flatten(ikdtree->Root_Node, ikdtree->PCL_Storage, NOT_RECORD);
                 featsFromMap->clear();
-                featsFromMap->points = ikdtree.PCL_Storage;
+                featsFromMap->points = ikdtree->PCL_Storage;
                 publish_map(pubLaserCloudMap);
             }
 
@@ -4550,10 +4916,12 @@ int main(int argc, char **argv)
             // localization 模式: 仅初始化完成后才允许建图步骤 (防止未初始化时创建锚定在原点的错误关键帧)
             if (slam_mode == 0 || initializedFlag == 2)
             {
+                
                 saveKeyFramesAndFactor();
-                correctPoses();
                 t3 = omp_get_wtime();
+                correctPoses();
                 map_incremental();
+                tryInstallAsyncIKdTreeRebuild();
                 t5 = omp_get_wtime();
             }
             else
@@ -4600,7 +4968,7 @@ int main(int argc, char **argv)
             if (runtime_pos_log)
             {
                 frame_num++;
-                kdtree_size_end = ikdtree.size();
+                kdtree_size_end = ikdtree->size();
                 aver_time_consu = aver_time_consu * (frame_num - 1) / frame_num + (t5 - t0) / frame_num;
                 aver_time_icp = aver_time_icp * (frame_num - 1) / frame_num + (t_update_end - t_update_start) / frame_num;
                 aver_time_match = aver_time_match * (frame_num - 1) / frame_num + (match_time) / frame_num;
@@ -4654,7 +5022,9 @@ int main(int argc, char **argv)
     }
 
     startFlag = false;
+    stopAsyncIKdTreeRebuildThread();
     loopthread.join(); //  分离线程
+    ikdtreeRebuildThread.join();
 
     return 0;
 }
