@@ -40,9 +40,9 @@ mapping:
 localization:
     auto_localization_enable: true
     initframe_FitnessScore: 0.1
-    search_radius: 10.0
-    localmap_leafsize: 0.5
-    icp_correspondence_dist: 100.0
+    search_radius: 20.0
+    localmap_leafsize: 0.3
+    icp_correspondence_dist: 10.0
     icp_max_iters: 100
     safe_speed: 15.0
 
@@ -90,9 +90,9 @@ surroundingKeyframeSearchRadius: 50.0         # meters, within n meters scan-to-
 
 # Loop closure
 loopClosureEnableFlag: true                   # use loopclousre or not 
-loopClosureFrequency: 1.0                     # Hz, regulate loop closure constraint add frequency
-surroundingKeyframeSize: 50                   # submap size (when loop closure enabled)
-historyKeyframeSearchRadius: 30             # meters, key frame that is within n meters from current pose will be considerd for loop closure
+loopClosureFrequency: 0.2                    # Hz, regulate loop closure constraint add frequency
+surroundingKeyframeSize: 20                   # submap size (when loop closure enabled)
+historyKeyframeSearchRadius: 3             # meters, key frame that is within n meters from current pose will be considerd for loop closure
 historyKeyframeSearchTimeDiff: 30.0           # seconds, key frame that is n seconds older will be considered for loop closure
 historyKeyframeSearchNum: 20                  # number of hostory key frames will be fused into a submap for loop closure
 historyKeyframeFitnessScore: 0.3              # icp threshold, the smaller the better alignment

@@ -347,6 +347,7 @@ double gnss_calib_max_time_diff;                  //  最大时间匹配容差
 shared_ptr<GnssProcess> p_gnss(new GnssProcess());
 GnssProcess gnss_data;
 ros::Publisher pubGnssPath ;
+ros::Publisher pubGnssInitMarker ;
 nav_msgs::Path gps_path ;
 vector<double>       extrinT_Gnss2Lidar(3, 0.0);
 vector<double>       extrinR_Gnss2Lidar(9, 0.0);
@@ -1750,9 +1751,27 @@ bool gnssAutoInit()
     }
     if (!found || abs(latest.pose.pose.position.x) < 1e-6) return false;
 
+    // 验证 GNSS 定位质量，防止使用无效定位进行初始化
+    if (gnss_data.status < 0)
+    {
+        ROS_WARN("[localization] GNSS has no fix (status=%d), cannot auto-init",
+                 gnss_data.status);
+        return false;
+    }
+
     double gx = latest.pose.pose.position.x;
     double gy = latest.pose.pose.position.y;
     double gz = latest.pose.pose.position.z;
+
+    // 将查询点从原始 ENU 转换到 LiDAR 世界系，与 KD-tree 数据坐标系一致
+    if (gnss_extrinsic_calibrated)
+    {
+        Eigen::Vector3d P_enu(gx, gy, gz);
+        Eigen::Vector3d P_lidar = Gnss_R_wrt_Lidar * P_enu + Gnss_T_wrt_Lidar;
+        gx = P_lidar.x();
+        gy = P_lidar.y();
+        gz = P_lidar.z();
+    }
 
     PointType sp; sp.x = gx; sp.y = gy; sp.z = gz;
     kdtreeGNSSKeyPoses->setInputCloud(gnssCloudKeyPoses3D);
@@ -1773,6 +1792,33 @@ bool gnssAutoInit()
     state_point.rot = EulerToQuat(cloudKeyPoses6D->points[kf_idx].roll, cloudKeyPoses6D->points[kf_idx].pitch, cloudKeyPoses6D->points[kf_idx].yaw);
     state_point.vel.setZero();
     kf.change_x(state_point);
+
+    // 发布 GNSS 初始化位置 Marker（map 系中的球体）
+    {
+        visualization_msgs::Marker gnssInitMarker;
+        gnssInitMarker.header.frame_id = odometryFrame;
+        gnssInitMarker.header.stamp = ros::Time::now();
+        gnssInitMarker.action = visualization_msgs::Marker::ADD;
+        gnssInitMarker.type = visualization_msgs::Marker::SPHERE;
+        gnssInitMarker.ns = "gnss_init";
+        gnssInitMarker.id = 0;
+        gnssInitMarker.pose.position.x = gx;
+        gnssInitMarker.pose.position.y = gy;
+        gnssInitMarker.pose.position.z = gz;
+        gnssInitMarker.pose.orientation.x = 0;
+        gnssInitMarker.pose.orientation.y = 0;
+        gnssInitMarker.pose.orientation.z = 0;
+        gnssInitMarker.pose.orientation.w = 1;
+        gnssInitMarker.scale.x = 0.5;
+        gnssInitMarker.scale.y = 0.5;
+        gnssInitMarker.scale.z = 0.5;
+        gnssInitMarker.color.r = 0.0;
+        gnssInitMarker.color.g = 1.0;
+        gnssInitMarker.color.b = 0.0;
+        gnssInitMarker.color.a = 0.8;
+        gnssInitMarker.lifetime = ros::Duration(0);  // 永久显示
+        pubGnssInitMarker.publish(gnssInitMarker);
+    }
 
     initializedFlag = 1;
     return true;
@@ -1802,7 +1848,7 @@ void icpLocalizationInit(pcl::PointCloud<PointType>::Ptr scan_lidar_frame)
     icp.setMaximumIterations(localization_icp_max_iters);
     icp.setTransformationEpsilon(1e-6);
     icp.setEuclideanFitnessEpsilon(1e-6);
-    icp.setRANSACIterations(0);
+    icp.setRANSACIterations(5);
     icp.setInputSource(scanW);
     icp.setInputTarget(localizationLocalMap);
     pcl::PointCloud<PointType>::Ptr unused(new pcl::PointCloud<PointType>());
@@ -1835,6 +1881,33 @@ void icpLocalizationInit(pcl::PointCloud<PointType>::Ptr scan_lidar_frame)
         pub_slam_state.publish(sm);
 
         ROS_INFO("[localization] ICP init SUCCESS: score=%.6f < threshold=%.6f", score, initframe_FitnessScore);
+        
+        // 发布 ICP 初始化位置 Marker（map 系中的球体）
+        {
+            visualization_msgs::Marker gnssInitMarker;
+            gnssInitMarker.header.frame_id = odometryFrame;
+            gnssInitMarker.header.stamp = ros::Time::now();
+            gnssInitMarker.action = visualization_msgs::Marker::ADD;
+            gnssInitMarker.type = visualization_msgs::Marker::SPHERE;
+            gnssInitMarker.ns = "gnss_init";
+            gnssInitMarker.id = 1;
+            gnssInitMarker.pose.position.x = x;
+            gnssInitMarker.pose.position.y = y;
+            gnssInitMarker.pose.position.z = z;
+            gnssInitMarker.pose.orientation.x = 0;
+            gnssInitMarker.pose.orientation.y = 0;
+            gnssInitMarker.pose.orientation.z = 0;
+            gnssInitMarker.pose.orientation.w = 1;
+            gnssInitMarker.scale.x = 0.5;
+            gnssInitMarker.scale.y = 0.5;
+            gnssInitMarker.scale.z = 0.5;
+            gnssInitMarker.color.r = 0.0;
+            gnssInitMarker.color.g = 0.0;
+            gnssInitMarker.color.b = 1.0;
+            gnssInitMarker.color.a = 1.0;
+            gnssInitMarker.lifetime = ros::Duration(0);  // 永久显示
+            pubGnssInitMarker.publish(gnssInitMarker);
+        }
     }
     else
     {
@@ -2112,9 +2185,9 @@ void gnss_cbk(const sensor_msgs::NavSatFixConstPtr& msg_in)
 
         //  save_gnss path
         PointTypePose thisPose6D;  
-        thisPose6D.x = msg_gnss_pose.pose.position.x ;
-        thisPose6D.y = msg_gnss_pose.pose.position.y ;
-        thisPose6D.z = msg_gnss_pose.pose.position.z ;
+        thisPose6D.x = gnss_data.local_E;  // 存原始 ENU，统一在保存时做外参变换
+        thisPose6D.y = gnss_data.local_N;
+        thisPose6D.z = gnss_data.local_U;
         thisPose6D.intensity = 0;
         thisPose6D.roll =0;
         thisPose6D.pitch = 0;
@@ -3005,14 +3078,24 @@ bool savemap_to_dir(std::string save_dir)
                          << q.x() << " " << q.y() << " " << q.z() << " " << q.w() << "\n";
     }
 
-    // 写入 GNSS 位姿
+    // 写入 GNSS 位姿（统一使用最终外参将原始ENU变换到LiDAR世界系，附加最近关键帧索引）
     for (int i = 0; i < (int)gnss_cloudKeyPoses6D->size(); i++)
     {
         auto &p = gnss_cloudKeyPoses6D->points[i];
+        // 找到最近关键帧索引（±1s内）
+        int nk = -1; double md = 1.0;
+        for (int k = 0; k < (int)cloudKeyPoses6D->size(); k++)
+        {
+            double d = std::abs(cloudKeyPoses6D->points[k].time - p.time);
+            if (d < md) { md = d; nk = k; }
+        }
+        Eigen::Vector3d P_raw(p.x, p.y, p.z);  // 原始 ENU
+        Eigen::Vector3d P_lidar = Gnss_R_wrt_Lidar * P_raw + Gnss_T_wrt_Lidar;  // 统一变换
         Eigen::Quaterniond q = EulerToQuat(p.roll, p.pitch, p.yaw);
         pose_gnss << p.time << " "
-                  << p.x << " " << p.y << " " << p.z << " "
-                  << q.x() << " " << q.y() << " " << q.z() << " " << q.w() << "\n";
+                  << P_lidar.x() << " " << P_lidar.y() << " " << P_lidar.z() << " "
+                  << q.x() << " " << q.y() << " " << q.z() << " " << q.w() << " "
+                  << nk << "\n";
     }
 
     pose_optimized.close();
@@ -3209,9 +3292,20 @@ bool savemap_to_dir_incremental(std::string save_dir)
         for (int i = 0; i < (int)gnss_cloudKeyPoses6D->size(); i++)
         {
             auto &p = gnss_cloudKeyPoses6D->points[i];
+            // 找到最近关键帧索引（±1s内）
+            int nk = -1; double md = 1.0;
+            for (int k = 0; k < (int)cloudKeyPoses6D->size(); k++)
+            {
+                double d = std::abs(cloudKeyPoses6D->points[k].time - p.time);
+                if (d < md) { md = d; nk = k; }
+            }
+            Eigen::Vector3d P_raw(p.x, p.y, p.z);  // 原始 ENU
+            Eigen::Vector3d P_lidar = Gnss_R_wrt_Lidar * P_raw + Gnss_T_wrt_Lidar;  // 统一变换
             Eigen::Quaterniond q = EulerToQuat(p.roll, p.pitch, p.yaw);
-            pose_gnss << p.time << " " << p.x << " " << p.y << " " << p.z << " "
-                      << q.x() << " " << q.y() << " " << q.z() << " " << q.w() << "\n";
+            pose_gnss << p.time << " "
+                      << P_lidar.x() << " " << P_lidar.y() << " " << P_lidar.z() << " "
+                      << q.x() << " " << q.y() << " " << q.z() << " " << q.w() << " "
+                      << nk << "\n";
         }
         pose_optimized.close();
         pose_unoptimized.close();
@@ -3427,13 +3521,19 @@ bool load_map(std::string load_dir)
                 double gt, gx, gy, gz, gqx, gqy, gqz, gqw;
                 if (gss >> gt >> gx >> gy >> gz >> gqx >> gqy >> gqz >> gqw)
                 {
-                    int nk = -1; double md = 1.0;
-                    for (int k = 0; k < loaded_count; k++)
+                    int nk = -1;
+                    // 优先读取显式关键帧索引（新格式），失败则回退时间戳匹配（兼容旧格式）
+                    if (!(gss >> nk))
                     {
-                        double d = std::abs(cloudKeyPoses6D->points[k].time - gt);
-                        if (d < md) { md = d; nk = k; }
+                        double md = 1.0;
+                        for (int k = 0; k < loaded_count; k++)
+                        {
+                            double d = std::abs(cloudKeyPoses6D->points[k].time - gt);
+                            if (d < md) { md = d; nk = k; }
+                        }
                     }
-                    if (nk >= 0)
+                    // 验证索引有效性
+                    if (nk >= 0 && nk < loaded_count)
                     {
                         PointType gp;
                         gp.x = gx; gp.y = gy; gp.z = gz; gp.intensity = nk;
@@ -4123,6 +4223,7 @@ int main(int argc, char **argv)
 
     ros::Publisher pubPathUpdate = nh.advertise<nav_msgs::Path>("/x_nav/mapping_path", 100000);                   //  isam更新后的path
     pubGnssPath = nh.advertise<nav_msgs::Path>("gnss_path", 100000);
+    pubGnssInitMarker = nh.advertise<visualization_msgs::Marker>("/x_nav/gnss_init_marker", 10);
     pubLaserCloudSurround = nh.advertise<sensor_msgs::PointCloud2>("/x_nav/local_map", 1); // 发布局部关键帧map的特征点云
     pubOptimizedGlobalMap = nh.advertise<sensor_msgs::PointCloud2>("fast_lio_sam/mapping/map_global_optimized", 1); // 发布局部关键帧map的特征点云
 
