@@ -1328,14 +1328,14 @@ void Preprocess::rs_handler(const sensor_msgs::PointCloud2::ConstPtr &msg)
   // pub_func(pl_surf, pub_corn, msg->header.stamp);
 
   clock_gettime(CLOCK_REALTIME, &time2);
-  float temp = (time2.tv_nsec - time1.tv_nsec) / 1000000;
-  if(temp >= 10)
-  {
-    std::cout << "\033[104m" << "[ INFO ]: Preprocess time cost: " << temp << " ms" << "\033[0m" << std::endl;
-  }
-  else
-  {
-    std::cout << "\033[0m" << "[ INFO ]: Preprocess time cost: " << temp << " ms" << std::endl;
-  }
-  std::cout << "\033[1m" << "[ INFO ]: pl_surf points: " << pl_surf.points.size() << std::endl;
+  // float temp = (time2.tv_nsec - time1.tv_nsec) / 1000000;
+  // if(temp >= 10)
+  // {
+  //   std::cout << "\033[104m" << "[ INFO ]: Preprocess time cost: " << temp << " ms" << "\033[0m" << std::endl;
+  // }
+  // else
+  // {
+  //   std::cout << "\033[0m" << "[ INFO ]: Preprocess time cost: " << temp << " ms" << std::endl;
+  // }
+  // std::cout << "\033[1m" << "[ INFO ]: pl_surf points: " << pl_surf.points.size() << std::endl;
 }

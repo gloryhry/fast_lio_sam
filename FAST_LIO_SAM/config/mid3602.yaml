@@ -49,7 +49,7 @@ localization:
 # 输入坐标转换（可选）
 input_transform:
     enable: true  # 是否启用输入坐标转换
-
+    gravity_align_enable: true
     # IMU 原始坐标系到 base_link 的外参
     imu_to_baselink_T: [0.0, 0.0, 0.0]
     imu_to_baselink_R: [0.90631, 0.00000, 0.42262, 0.00000, 1.00000, 0.00000, -0.42262, 0.00000, 0.90631]

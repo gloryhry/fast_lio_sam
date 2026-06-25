@@ -197,6 +197,9 @@ M3D Imu_R_wrt_Baselink(Eye3d);      // IMU 到 base_link 的旋转
 V3D Lidar_T_wrt_Baselink(Zero3d);   // Lidar 到 base_link 的平移
 M3D Lidar_R_wrt_Baselink(Eye3d);    // Lidar 到 base_link 的旋转
 bool enable_input_transform = false; // 是否启用输入坐标转换
+bool gravity_align_enable = true;    // 是否用IMU初始化重力方向校正初始倾斜
+bool gravity_align_applied = false;  // 重力对齐只执行一次
+std::mutex input_transform_mtx;
 
 // 地面分割参数
 bool enable_ground_seg = false;
@@ -460,6 +463,71 @@ std::string base_linkFrame;
 std::string lidar_linkFrame;
 std::string imu_linkFrame;
 std::string mapFrame;
+
+void getInputTransformSnapshot(M3D &imu_R, V3D &imu_T, M3D &lidar_R, V3D &lidar_T)
+{
+    std::lock_guard<std::mutex> lock(input_transform_mtx);
+    imu_R = Imu_R_wrt_Baselink;
+    imu_T = Imu_T_wrt_Baselink;
+    lidar_R = Lidar_R_wrt_Baselink;
+    lidar_T = Lidar_T_wrt_Baselink;
+}
+
+void publishInputStaticTransforms()
+{
+    if (!enable_input_transform)
+        return;
+
+    M3D imu_R, lidar_R;
+    V3D imu_T, lidar_T;
+    getInputTransformSnapshot(imu_R, imu_T, lidar_R, lidar_T);
+
+    static tf2_ros::StaticTransformBroadcaster static_br;
+
+    geometry_msgs::TransformStamped base_to_lidar_stamped;
+    base_to_lidar_stamped.header.stamp = ros::Time::now();
+    base_to_lidar_stamped.header.frame_id = base_linkFrame;
+    base_to_lidar_stamped.child_frame_id = lidar_linkFrame;
+    base_to_lidar_stamped.transform.translation.x = lidar_T.x();
+    base_to_lidar_stamped.transform.translation.y = lidar_T.y();
+    base_to_lidar_stamped.transform.translation.z = lidar_T.z();
+    Eigen::Quaterniond q_lidar_base(lidar_R);
+    q_lidar_base.normalize();
+    base_to_lidar_stamped.transform.rotation.x = q_lidar_base.x();
+    base_to_lidar_stamped.transform.rotation.y = q_lidar_base.y();
+    base_to_lidar_stamped.transform.rotation.z = q_lidar_base.z();
+    base_to_lidar_stamped.transform.rotation.w = q_lidar_base.w();
+    static_br.sendTransform(base_to_lidar_stamped);
+
+    geometry_msgs::TransformStamped base_to_imu_stamped;
+    base_to_imu_stamped.header.stamp = ros::Time::now();
+    base_to_imu_stamped.header.frame_id = base_linkFrame;
+    base_to_imu_stamped.child_frame_id = imu_linkFrame;
+    base_to_imu_stamped.transform.translation.x = imu_T.x();
+    base_to_imu_stamped.transform.translation.y = imu_T.y();
+    base_to_imu_stamped.transform.translation.z = imu_T.z();
+    Eigen::Quaterniond q_imu_base(imu_R);
+    q_imu_base.normalize();
+    base_to_imu_stamped.transform.rotation.x = q_imu_base.x();
+    base_to_imu_stamped.transform.rotation.y = q_imu_base.y();
+    base_to_imu_stamped.transform.rotation.z = q_imu_base.z();
+    base_to_imu_stamped.transform.rotation.w = q_imu_base.w();
+    static_br.sendTransform(base_to_imu_stamped);
+}
+
+void applyGravityAlignmentToInputTransforms(const M3D &R_align)
+{
+    std::lock_guard<std::mutex> lock(input_transform_mtx);
+    Imu_R_wrt_Baselink = R_align * Imu_R_wrt_Baselink;
+    Lidar_R_wrt_Baselink = R_align * Lidar_R_wrt_Baselink;
+    Imu_T_wrt_Baselink = R_align * Imu_T_wrt_Baselink;
+    Lidar_T_wrt_Baselink = R_align * Lidar_T_wrt_Baselink;
+}
+
+bool gravityAlignActive()
+{
+    return enable_input_transform && gravity_align_enable && slam_mode != 1;
+}
 
 /**
  * 更新里程计轨迹
@@ -1964,6 +2032,11 @@ void standard_pcl_cbk(const sensor_msgs::PointCloud2::ConstPtr &msg)
     // 新增：如果启用输入坐标转换，转换点云到 base_link
     if (enable_input_transform)
     {
+        M3D imu_R_snapshot, lidar_R_snapshot;
+        V3D imu_T_snapshot, lidar_T_snapshot;
+        getInputTransformSnapshot(imu_R_snapshot, imu_T_snapshot,
+                                  lidar_R_snapshot, lidar_T_snapshot);
+
         PointCloudXYZI::Ptr transformed_ptr(new PointCloudXYZI());
         transformed_ptr->reserve(ptr->size());
 
@@ -1973,7 +2046,7 @@ void standard_pcl_cbk(const sensor_msgs::PointCloud2::ConstPtr &msg)
             PointType p_out;
 
             V3D p_lidar(p_in.x, p_in.y, p_in.z);
-            V3D p_baselink = Lidar_R_wrt_Baselink * p_lidar + Lidar_T_wrt_Baselink;
+            V3D p_baselink = lidar_R_snapshot * p_lidar + lidar_T_snapshot;
 
             p_out.x = p_baselink.x();
             p_out.y = p_baselink.y();
@@ -2422,6 +2495,11 @@ void livox_pcl_cbk(const livox_ros_driver::CustomMsg::ConstPtr &msg)
     // 新增：如果启用输入坐标转换，转换点云到 base_link
     if (enable_input_transform)
     {
+        M3D imu_R_snapshot, lidar_R_snapshot;
+        V3D imu_T_snapshot, lidar_T_snapshot;
+        getInputTransformSnapshot(imu_R_snapshot, imu_T_snapshot,
+                                  lidar_R_snapshot, lidar_T_snapshot);
+
         PointCloudXYZI::Ptr transformed_ptr(new PointCloudXYZI());
         transformed_ptr->reserve(ptr->size());
 
@@ -2431,7 +2509,7 @@ void livox_pcl_cbk(const livox_ros_driver::CustomMsg::ConstPtr &msg)
             PointType p_out;
 
             V3D p_lidar(p_in.x, p_in.y, p_in.z);
-            V3D p_baselink = Lidar_R_wrt_Baselink * p_lidar + Lidar_T_wrt_Baselink;
+            V3D p_baselink = lidar_R_snapshot * p_lidar + lidar_T_snapshot;
 
             p_out.x = p_baselink.x();
             p_out.y = p_baselink.y();
@@ -2493,11 +2571,16 @@ void imu_cbk(const sensor_msgs::Imu::ConstPtr &msg_in)
     // 新增：如果启用输入坐标转换，转换 IMU 数据到 base_link
     if (enable_input_transform)
     {
+        M3D imu_R_snapshot, lidar_R_snapshot;
+        V3D imu_T_snapshot, lidar_T_snapshot;
+        getInputTransformSnapshot(imu_R_snapshot, imu_T_snapshot,
+                                  lidar_R_snapshot, lidar_T_snapshot);
+
         // 转换线性加速度
         V3D acc(msg->linear_acceleration.x,
                 msg->linear_acceleration.y,
                 msg->linear_acceleration.z);
-        acc = Imu_R_wrt_Baselink * acc;
+        acc = imu_R_snapshot * acc;
         msg->linear_acceleration.x = acc.x();
         msg->linear_acceleration.y = acc.y();
         msg->linear_acceleration.z = acc.z();
@@ -2506,7 +2589,7 @@ void imu_cbk(const sensor_msgs::Imu::ConstPtr &msg_in)
         V3D gyro(msg->angular_velocity.x,
                  msg->angular_velocity.y,
                  msg->angular_velocity.z);
-        gyro = Imu_R_wrt_Baselink * gyro;
+        gyro = imu_R_snapshot * gyro;
         msg->angular_velocity.x = gyro.x();
         msg->angular_velocity.y = gyro.y();
         msg->angular_velocity.z = gyro.z();
@@ -2514,7 +2597,7 @@ void imu_cbk(const sensor_msgs::Imu::ConstPtr &msg_in)
         // 转换姿态（四元数）
         Eigen::Quaterniond q(msg->orientation.w, msg->orientation.x,
                              msg->orientation.y, msg->orientation.z);
-        Eigen::Quaterniond q_rot(Imu_R_wrt_Baselink);
+        Eigen::Quaterniond q_rot(imu_R_snapshot);
         q = q_rot * q;
         msg->orientation.w = q.w();
         msg->orientation.x = q.x();
@@ -4481,6 +4564,7 @@ int main(int argc, char **argv)
 
     // 新增：读取输入转换外参
     nh.param<bool>("input_transform/enable", enable_input_transform, false);
+    nh.param<bool>("input_transform/gravity_align_enable", gravity_align_enable, true);
     vector<double> imu_to_baselink_T_vec, imu_to_baselink_R_vec;
     vector<double> lidar_to_baselink_T_vec, lidar_to_baselink_R_vec;
     nh.param<vector<double>>("input_transform/imu_to_baselink_T", imu_to_baselink_T_vec, vector<double>());
@@ -4513,6 +4597,7 @@ int main(int argc, char **argv)
                  Imu_T_wrt_Baselink.x(), Imu_T_wrt_Baselink.y(), Imu_T_wrt_Baselink.z());
         ROS_INFO("  Lidar->Baselink T: [%.3f, %.3f, %.3f]",
                  Lidar_T_wrt_Baselink.x(), Lidar_T_wrt_Baselink.y(), Lidar_T_wrt_Baselink.z());
+        ROS_INFO("  Gravity alignment: %s", gravityAlignActive() ? "enabled" : "disabled");
     }
 
     nh.param<float>("odometrySurfLeafSize", odometrySurfLeafSize, 0.2);
@@ -4612,6 +4697,7 @@ int main(int argc, char **argv)
     Lidar_T_wrt_IMU << VEC_FROM_ARRAY(extrinT);
     Lidar_R_wrt_IMU << MAT_FROM_ARRAY(extrinR);
     p_imu->set_extrinsic(Lidar_T_wrt_IMU, Lidar_R_wrt_IMU);
+    p_imu->set_gravity_align_enable(gravityAlignActive());
     p_imu->set_gyr_cov(V3D(gyr_cov, gyr_cov, gyr_cov));
     p_imu->set_acc_cov(V3D(acc_cov, acc_cov, acc_cov)); // 加速度协方差
     p_imu->set_gyr_bias_cov(V3D(b_gyr_cov, b_gyr_cov, b_gyr_cov));
@@ -4698,38 +4784,7 @@ int main(int argc, char **argv)
     static_br.sendTransform(static_transformStamped);
 
     // 如果启用 input_transform，发布 base_link 到 lidar_link 和 imu_link 的静态 TF
-    if (enable_input_transform)
-    {
-        // base_link -> lidar_link
-        geometry_msgs::TransformStamped base_to_lidar_stamped;
-        base_to_lidar_stamped.header.stamp = ros::Time::now();
-        base_to_lidar_stamped.header.frame_id = base_linkFrame;
-        base_to_lidar_stamped.child_frame_id = lidar_linkFrame;
-        base_to_lidar_stamped.transform.translation.x = Lidar_T_wrt_Baselink.x();
-        base_to_lidar_stamped.transform.translation.y = Lidar_T_wrt_Baselink.y();
-        base_to_lidar_stamped.transform.translation.z = Lidar_T_wrt_Baselink.z();
-        Eigen::Quaterniond q_lidar_base(Lidar_R_wrt_Baselink);
-        base_to_lidar_stamped.transform.rotation.x = q_lidar_base.x();
-        base_to_lidar_stamped.transform.rotation.y = q_lidar_base.y();
-        base_to_lidar_stamped.transform.rotation.z = q_lidar_base.z();
-        base_to_lidar_stamped.transform.rotation.w = q_lidar_base.w();
-        static_br.sendTransform(base_to_lidar_stamped);
-
-        // base_link -> imu_link
-        geometry_msgs::TransformStamped base_to_imu_stamped;
-        base_to_imu_stamped.header.stamp = ros::Time::now();
-        base_to_imu_stamped.header.frame_id = base_linkFrame;
-        base_to_imu_stamped.child_frame_id = imu_linkFrame;
-        base_to_imu_stamped.transform.translation.x = Imu_T_wrt_Baselink.x();
-        base_to_imu_stamped.transform.translation.y = Imu_T_wrt_Baselink.y();
-        base_to_imu_stamped.transform.translation.z = Imu_T_wrt_Baselink.z();
-        Eigen::Quaterniond q_imu_base(Imu_R_wrt_Baselink);
-        base_to_imu_stamped.transform.rotation.x = q_imu_base.x();
-        base_to_imu_stamped.transform.rotation.y = q_imu_base.y();
-        base_to_imu_stamped.transform.rotation.z = q_imu_base.z();
-        base_to_imu_stamped.transform.rotation.w = q_imu_base.w();
-        static_br.sendTransform(base_to_imu_stamped);
-    }
+    publishInputStaticTransforms();
 
     // gnss
     ros::Subscriber sub_gnss = nh.subscribe(gnss_topic, 200000, gnss_cbk);
@@ -4806,6 +4861,26 @@ int main(int argc, char **argv)
             //根据imu数据序列和lidar数据，向前传播纠正点云的畸变, 此前已经完成间隔采样或特征提取
             // feats_undistort 为畸变纠正之后的点云,lidar系
             p_imu->Process(Measures, kf, feats_undistort);
+
+            M3D gravity_align_R;
+            if (gravityAlignActive() && !gravity_align_applied &&
+                p_imu->consume_gravity_alignment(gravity_align_R))
+            {
+                applyGravityAlignmentToInputTransforms(gravity_align_R);
+                gravity_align_applied = true;
+
+                {
+                    std::lock_guard<std::mutex> lock(mtx_buffer);
+                    lidar_buffer.clear();
+                    imu_buffer.clear();
+                    time_buffer.clear();
+                }
+
+                publishInputStaticTransforms();
+                ROS_INFO("Applied gravity alignment to input transforms and cleared pre-alignment buffers.");
+                continue;
+            }
+
             state_point = kf.get_x();                                               // 前向传播后body的状态预测值
             pos_lid = state_point.pos + state_point.rot * state_point.offset_T_L_I; // global系 lidar位置
 

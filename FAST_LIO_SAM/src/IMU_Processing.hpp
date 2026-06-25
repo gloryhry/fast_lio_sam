@@ -48,6 +48,8 @@ class ImuProcess
   void set_acc_cov(const V3D &scaler);
   void set_gyr_bias_cov(const V3D &b_g);
   void set_acc_bias_cov(const V3D &b_a);
+  void set_gravity_align_enable(bool enable);
+  bool consume_gravity_alignment(M3D &rot);
   Eigen::Matrix<double, 12, 12> Q;
   void Process(const MeasureGroup &meas,  esekfom::esekf<state_ikfom, 12, input_ikfom> &kf_state, PointCloudXYZI::Ptr pcl_un_);
 
@@ -62,6 +64,8 @@ class ImuProcess
 
  private:
   void IMU_init(const MeasureGroup &meas, esekfom::esekf<state_ikfom, 12, input_ikfom> &kf_state, int &N);
+  bool ApplyGravityAlignment(esekfom::esekf<state_ikfom, 12, input_ikfom> &kf_state);
+  sensor_msgs::ImuConstPtr RotateImuMsg(const sensor_msgs::ImuConstPtr &imu, const M3D &rot);
   void UndistortPcl(const MeasureGroup &meas, esekfom::esekf<state_ikfom, 12, input_ikfom> &kf_state, PointCloudXYZI &pcl_in_out);
 
   PointCloudXYZI::Ptr cur_pcl_un_;
@@ -75,11 +79,15 @@ class ImuProcess
   V3D mean_gyr;
   V3D angvel_last;
   V3D acc_s_last;
+  M3D gravity_align_R_;
   double start_timestamp_;
   double last_lidar_end_time_;
   int    init_iter_num = 1; // 初始化时，imu数据迭代的次数
   bool   b_first_frame_ = true;
   bool   imu_need_init_ = true;
+  bool   gravity_align_enable_ = false;
+  bool   gravity_align_ready_ = false;
+  bool   gravity_align_done_ = false;
 };
 
 ImuProcess::ImuProcess()
@@ -96,6 +104,7 @@ ImuProcess::ImuProcess()
   angvel_last     = Zero3d;
   Lidar_T_wrt_IMU = Zero3d;
   Lidar_R_wrt_IMU = Eye3d;
+  gravity_align_R_ = Eye3d;
   last_imu_.reset(new sensor_msgs::Imu());
 }
 
@@ -110,6 +119,9 @@ void ImuProcess::Reset()
   imu_need_init_    = true;
   start_timestamp_  = -1;
   init_iter_num     = 1;
+  gravity_align_ready_ = false;
+  gravity_align_done_ = false;
+  gravity_align_R_ = Eye3d;
   v_imu_.clear();
   IMUpose.clear();
   last_imu_.reset(new sensor_msgs::Imu());
@@ -152,6 +164,99 @@ void ImuProcess::set_gyr_bias_cov(const V3D &b_g)
 void ImuProcess::set_acc_bias_cov(const V3D &b_a)
 {
   cov_bias_acc = b_a;
+}
+
+void ImuProcess::set_gravity_align_enable(bool enable)
+{
+  gravity_align_enable_ = enable;
+}
+
+bool ImuProcess::consume_gravity_alignment(M3D &rot)
+{
+  if (!gravity_align_ready_)
+  {
+    return false;
+  }
+
+  rot = gravity_align_R_;
+  gravity_align_ready_ = false;
+  return true;
+}
+
+sensor_msgs::ImuConstPtr ImuProcess::RotateImuMsg(const sensor_msgs::ImuConstPtr &imu, const M3D &rot)
+{
+  sensor_msgs::Imu::Ptr rotated(new sensor_msgs::Imu(*imu));
+
+  V3D acc(rotated->linear_acceleration.x,
+          rotated->linear_acceleration.y,
+          rotated->linear_acceleration.z);
+  acc = rot * acc;
+  rotated->linear_acceleration.x = acc.x();
+  rotated->linear_acceleration.y = acc.y();
+  rotated->linear_acceleration.z = acc.z();
+
+  V3D gyro(rotated->angular_velocity.x,
+           rotated->angular_velocity.y,
+           rotated->angular_velocity.z);
+  gyro = rot * gyro;
+  rotated->angular_velocity.x = gyro.x();
+  rotated->angular_velocity.y = gyro.y();
+  rotated->angular_velocity.z = gyro.z();
+
+  Eigen::Quaterniond q(rotated->orientation.w,
+                       rotated->orientation.x,
+                       rotated->orientation.y,
+                       rotated->orientation.z);
+  if (q.norm() > 1e-12)
+  {
+    q = Eigen::Quaterniond(rot) * q.normalized();
+    q.normalize();
+    rotated->orientation.w = q.w();
+    rotated->orientation.x = q.x();
+    rotated->orientation.y = q.y();
+    rotated->orientation.z = q.z();
+  }
+
+  return rotated;
+}
+
+bool ImuProcess::ApplyGravityAlignment(esekfom::esekf<state_ikfom, 12, input_ikfom> &kf_state)
+{
+  const double acc_norm = mean_acc.norm();
+  if (!std::isfinite(acc_norm) || acc_norm < 1e-6)
+  {
+    ROS_WARN("Skip gravity alignment: invalid mean acceleration norm %.6f", acc_norm);
+    gravity_align_done_ = true;
+    return false;
+  }
+
+  Eigen::Quaterniond q_align = Eigen::Quaterniond::FromTwoVectors(mean_acc.normalized(), V3D::UnitZ());
+  q_align.normalize();
+  gravity_align_R_ = q_align.toRotationMatrix();
+
+  state_ikfom init_state = kf_state.get_x();
+  V3D grav(init_state.grav[0], init_state.grav[1], init_state.grav[2]);
+  Lidar_T_wrt_IMU = gravity_align_R_ * Lidar_T_wrt_IMU;
+  Lidar_R_wrt_IMU = gravity_align_R_ * Lidar_R_wrt_IMU * gravity_align_R_.transpose();
+  init_state.grav = S2(gravity_align_R_ * grav);
+  init_state.bg = gravity_align_R_ * init_state.bg;
+  init_state.ba = gravity_align_R_ * init_state.ba;
+  init_state.offset_T_L_I = Lidar_T_wrt_IMU;
+  init_state.offset_R_L_I = Lidar_R_wrt_IMU;
+  kf_state.change_x(init_state);
+
+  mean_acc = gravity_align_R_ * mean_acc;
+  mean_gyr = gravity_align_R_ * mean_gyr;
+  angvel_last = gravity_align_R_ * angvel_last;
+  acc_s_last = gravity_align_R_ * acc_s_last;
+  last_imu_ = RotateImuMsg(last_imu_, gravity_align_R_);
+
+  gravity_align_ready_ = true;
+  gravity_align_done_ = true;
+  ROS_INFO("Gravity alignment prepared. aligned mean acc: [%.4f %.4f %.4f], grav: [%.4f %.4f %.4f]",
+           mean_acc.x(), mean_acc.y(), mean_acc.z(),
+           init_state.grav[0], init_state.grav[1], init_state.grav[2]);
+  return true;
 }
 
 void ImuProcess::IMU_init(const MeasureGroup &meas, esekfom::esekf<state_ikfom, 12, input_ikfom> &kf_state, int &N)
@@ -388,6 +493,10 @@ void ImuProcess::Process(const MeasureGroup &meas,  esekfom::esekf<state_ikfom, 
 
       cov_acc = cov_acc_scale;//??
       cov_gyr = cov_gyr_scale;
+      if (gravity_align_enable_ && !gravity_align_done_)
+      {
+        ApplyGravityAlignment(kf_state);
+      }
       ROS_INFO("IMU Initial Done");
       // ROS_INFO("IMU Initial Done: Gravity: %.4f %.4f %.4f %.4f; state.bias_g: %.4f %.4f %.4f; acc covarience: %.8f %.8f %.8f; gry covarience: %.8f %.8f %.8f",\
       //          imu_state.grav[0], imu_state.grav[1], imu_state.grav[2], mean_acc.norm(), cov_bias_gyr[0], cov_bias_gyr[1], cov_bias_gyr[2], cov_acc[0], cov_acc[1], cov_acc[2], cov_gyr[0], cov_gyr[1], cov_gyr[2]);
