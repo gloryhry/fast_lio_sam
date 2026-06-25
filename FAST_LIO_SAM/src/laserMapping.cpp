@@ -34,6 +34,7 @@
 // POSSIBILITY OF SUCH DAMAGE.
 #include <omp.h>
 #include <mutex>
+#include <atomic>
 #include <math.h>
 #include <thread>
 #include <fstream>
@@ -363,6 +364,7 @@ ros::ServiceServer slam_service;
 ros::Publisher pub_slam_state;
 bool show_globalmap_flag = false;
 int slam_mode = 0; // 0: mapping, 1: localization (对齐 digitaltwins-x-nav)
+std::atomic<bool> map_loaded{false}; // true when load_map() completed; block sensor data in localization mode until then
 int last_saved_keyframe_index = -1;  // 增量保存追踪
 
 // ---- Localization 初始化状态机 (对齐 digitaltwins-x-nav) ----
@@ -1584,6 +1586,8 @@ void velocitySafetyCheck();
 
 void standard_pcl_cbk(const sensor_msgs::PointCloud2::ConstPtr &msg)
 {
+    if (slam_mode == 1 && !map_loaded)
+        return;
     mtx_buffer.lock();
     scan_count++;
     double preprocess_start_time = omp_get_wtime();
@@ -1642,7 +1646,7 @@ void standard_pcl_cbk(const sensor_msgs::PointCloud2::ConstPtr &msg)
         if (initializedFlag == 1)
             icpLocalizationInit(ptr_lidar_frame);
     }
-
+    
     lidar_buffer.push_back(ptr);
     time_buffer.push_back(msg->header.stamp.toSec());
     last_timestamp_lidar = msg->header.stamp.toSec();
@@ -1788,7 +1792,7 @@ bool gnssAutoInit()
 
     buildLocalMapFromKeyframe(kf_idx);
 
-    state_point.pos = V3D(cloudKeyPoses6D->points[kf_idx].x, cloudKeyPoses6D->points[kf_idx].y, cloudKeyPoses6D->points[kf_idx].z);
+    state_point.pos = V3D(gx, gy, cloudKeyPoses6D->points[kf_idx].z);
     state_point.rot = EulerToQuat(cloudKeyPoses6D->points[kf_idx].roll, cloudKeyPoses6D->points[kf_idx].pitch, cloudKeyPoses6D->points[kf_idx].yaw);
     state_point.vel.setZero();
     kf.change_x(state_point);
@@ -1802,9 +1806,9 @@ bool gnssAutoInit()
         gnssInitMarker.type = visualization_msgs::Marker::SPHERE;
         gnssInitMarker.ns = "gnss_init";
         gnssInitMarker.id = 0;
-        gnssInitMarker.pose.position.x = gx;
-        gnssInitMarker.pose.position.y = gy;
-        gnssInitMarker.pose.position.z = gz;
+        gnssInitMarker.pose.position.x = state_point.pos(0);
+        gnssInitMarker.pose.position.y = state_point.pos(1);
+        gnssInitMarker.pose.position.z = state_point.pos(2);
         gnssInitMarker.pose.orientation.x = 0;
         gnssInitMarker.pose.orientation.y = 0;
         gnssInitMarker.pose.orientation.z = 0;
@@ -1836,89 +1840,113 @@ void icpLocalizationInit(pcl::PointCloud<PointType>::Ptr scan_lidar_frame)
     downSizeFilterICP.setInputCloud(scan_lidar_frame);
     downSizeFilterICP.filter(*scanDS);
 
-    // 转换到 world 系
+    // 转换到 world 系（只转换一次，使用原始 EKF 状态）
     pcl::PointCloud<PointType>::Ptr scanW(new pcl::PointCloud<PointType>());
     scanW->resize(scanDS->size());
     for (size_t i = 0; i < scanDS->size(); i++)
         pointBodyToWorld(&scanDS->points[i], &scanW->points[i]);
 
-    // ICP 匹配
-    pcl::IterativeClosestPoint<PointType, PointType> icp;
-    icp.setMaxCorrespondenceDistance(localization_icp_correspondence_dist);
-    icp.setMaximumIterations(localization_icp_max_iters);
-    icp.setTransformationEpsilon(1e-6);
-    icp.setEuclideanFitnessEpsilon(1e-6);
-    icp.setRANSACIterations(5);
-    icp.setInputSource(scanW);
-    icp.setInputTarget(localizationLocalMap);
-    pcl::PointCloud<PointType>::Ptr unused(new pcl::PointCloud<PointType>());
-    icp.align(*unused);
-
-    float score = icp.getFitnessScore();
-
-    if (icp.hasConverged() && score < initframe_FitnessScore)
+    // 最多重试 12 次，每次将初始猜测绕 Z 轴旋转 retry*30°
+    for (int retry = 0; retry < 12; retry++)
     {
-        // ICP 成功 — 修正 EKF 状态
-        Eigen::Affine3f T_corr(icp.getFinalTransformation());
-        float x, y, z, roll, pitch, yaw;
-        pcl::getTranslationAndEulerAngles(T_corr, x, y, z, roll, pitch, yaw);
-
-        state_point.pos += V3D(x, y, z);
-        Eigen::Quaterniond qc(Eigen::AngleAxisd((double)yaw, V3D::UnitZ()) *
-                              Eigen::AngleAxisd((double)pitch, V3D::UnitY()) *
-                              Eigen::AngleAxisd((double)roll, V3D::UnitX()));
-        state_point.rot = state_point.rot * qc;
-        state_point.vel.setZero();
-        kf.change_x(state_point);
-
-        initializedFlag = 2;
-        localization_flag_vel = 1;
-        last_safe_position = state_point.pos;
-        last_safety_check_time = lidar_end_time;
-
-        std_msgs::String sm;
-        sm.data = "5#" + std::to_string(score);
-        pub_slam_state.publish(sm);
-
-        ROS_INFO("[localization] ICP init SUCCESS: score=%.6f < threshold=%.6f", score, initframe_FitnessScore);
-        
-        // 发布 ICP 初始化位置 Marker（map 系中的球体）
+        // 构造 ICP 初始猜测矩阵：第 1 次用 Identity，之后绕 Z 轴旋转
+        Eigen::Matrix4f guess = Eigen::Matrix4f::Identity();
+        if (retry > 0)
         {
-            visualization_msgs::Marker gnssInitMarker;
-            gnssInitMarker.header.frame_id = odometryFrame;
-            gnssInitMarker.header.stamp = ros::Time::now();
-            gnssInitMarker.action = visualization_msgs::Marker::ADD;
-            gnssInitMarker.type = visualization_msgs::Marker::SPHERE;
-            gnssInitMarker.ns = "gnss_init";
-            gnssInitMarker.id = 1;
-            gnssInitMarker.pose.position.x = x;
-            gnssInitMarker.pose.position.y = y;
-            gnssInitMarker.pose.position.z = z;
-            gnssInitMarker.pose.orientation.x = 0;
-            gnssInitMarker.pose.orientation.y = 0;
-            gnssInitMarker.pose.orientation.z = 0;
-            gnssInitMarker.pose.orientation.w = 1;
-            gnssInitMarker.scale.x = 0.5;
-            gnssInitMarker.scale.y = 0.5;
-            gnssInitMarker.scale.z = 0.5;
-            gnssInitMarker.color.r = 0.0;
-            gnssInitMarker.color.g = 0.0;
-            gnssInitMarker.color.b = 1.0;
-            gnssInitMarker.color.a = 1.0;
-            gnssInitMarker.lifetime = ros::Duration(0);  // 永久显示
-            pubGnssInitMarker.publish(gnssInitMarker);
+            float yaw_offset = retry * 30.0f * M_PI / 180.0f;
+            guess.block<3,3>(0,0) = Eigen::AngleAxisf(yaw_offset, Eigen::Vector3f::UnitZ()).toRotationMatrix();
         }
+
+        // ICP 匹配（传入初始猜测）
+        pcl::IterativeClosestPoint<PointType, PointType> icp;
+        icp.setMaxCorrespondenceDistance(localization_icp_correspondence_dist);
+        icp.setMaximumIterations(localization_icp_max_iters);
+        icp.setTransformationEpsilon(1e-6);
+        icp.setEuclideanFitnessEpsilon(1e-6);
+        icp.setRANSACIterations(5);
+        icp.setInputSource(scanW);
+        icp.setInputTarget(localizationLocalMap);
+        pcl::PointCloud<PointType>::Ptr unused(new pcl::PointCloud<PointType>());
+        icp.align(*unused, guess);
+
+        float score = icp.getFitnessScore();
+
+        if (icp.hasConverged() && score < initframe_FitnessScore)
+        {
+            // ICP 成功 — 修正 EKF 状态
+            Eigen::Affine3f T_corr(icp.getFinalTransformation());
+            float x, y, z, roll, pitch, yaw;
+            pcl::getTranslationAndEulerAngles(T_corr, x, y, z, roll, pitch, yaw);
+
+            state_point.pos += V3D(x, y, z);
+            Eigen::Quaterniond qc(Eigen::AngleAxisd((double)yaw, V3D::UnitZ()) *
+                                  Eigen::AngleAxisd((double)pitch, V3D::UnitY()) *
+                                  Eigen::AngleAxisd((double)roll, V3D::UnitX()));
+            state_point.rot = state_point.rot * qc;
+            state_point.vel.setZero();
+            kf.change_x(state_point);
+
+            // 重置位置/旋转/速度协方差，确保后续 EKF 信任观测修正
+            auto P_init = kf.get_P();
+            P_init.block<3,3>(0,0) = Eigen::Matrix3d::Identity();   // pos (indices 0-2)
+            P_init.block<3,3>(3,3) = Eigen::Matrix3d::Identity();   // rot (indices 3-5)
+            P_init.block<3,3>(12,12) = Eigen::Matrix3d::Identity(); // vel (indices 12-14)
+            kf.change_P(P_init);
+
+            initializedFlag = 2;
+            localization_flag_vel = 1;
+            last_safe_position = state_point.pos;
+            last_safety_check_time = lidar_end_time;
+
+            std_msgs::String sm;
+            sm.data = "5#" + std::to_string(score);
+            pub_slam_state.publish(sm);
+
+            ROS_INFO("[localization] ICP init SUCCESS (retry=%d, yaw_offset=%.1f°): score=%.6f < threshold=%.6f",
+                     retry, retry * 30.0, score, initframe_FitnessScore);
+
+            // 发布 ICP 初始化位置 Marker（map 系中的球体）
+            {
+                visualization_msgs::Marker gnssInitMarker;
+                gnssInitMarker.header.frame_id = odometryFrame;
+                gnssInitMarker.header.stamp = ros::Time::now();
+                gnssInitMarker.action = visualization_msgs::Marker::ADD;
+                gnssInitMarker.type = visualization_msgs::Marker::SPHERE;
+                gnssInitMarker.ns = "gnss_init";
+                gnssInitMarker.id = 1;
+                gnssInitMarker.pose.position.x = x;
+                gnssInitMarker.pose.position.y = y;
+                gnssInitMarker.pose.position.z = z;
+                gnssInitMarker.pose.orientation.x = 0;
+                gnssInitMarker.pose.orientation.y = 0;
+                gnssInitMarker.pose.orientation.z = 0;
+                gnssInitMarker.pose.orientation.w = 1;
+                gnssInitMarker.scale.x = 0.5;
+                gnssInitMarker.scale.y = 0.5;
+                gnssInitMarker.scale.z = 0.5;
+                gnssInitMarker.color.r = 0.0;
+                gnssInitMarker.color.g = 0.0;
+                gnssInitMarker.color.b = 1.0;
+                gnssInitMarker.color.a = 1.0;
+                gnssInitMarker.lifetime = ros::Duration(0);  // 永久显示
+                pubGnssInitMarker.publish(gnssInitMarker);
+            }
+            return;  // 成功即退出
+        }
+
+        // 本次重试失败，记录日志后继续
+        ROS_INFO("[localization] ICP retry %d/%d (yaw_offset=%.1f°): score=%.6f (threshold=%.6f), %s",
+                 retry + 1, 12, retry * 30.0, score, initframe_FitnessScore,
+                 icp.hasConverged() ? "converged" : "not converged");
     }
-    else
+
+    // 所有 12 次重试均失败
     {
         std_msgs::String sm;
-        char buf[64];
-        snprintf(buf, sizeof(buf), "4#%.4f", score);
-        sm.data = buf;
+        sm.data = "4#0.9999";
         pub_slam_state.publish(sm);
 
-        ROS_INFO("[localization] ICP attempt: score=%.6f (threshold=%.6f), retrying...",
-                 score, initframe_FitnessScore);
+        ROS_WARN("[localization] ICP init FAILED after 12 retries: all attempts score >= threshold or not converged");
     }
 }
 
@@ -1962,6 +1990,8 @@ double timediff_lidar_wrt_imu = 0.0;
 bool timediff_set_flg = false; // 标记是否已经进行了时间补偿
 void livox_pcl_cbk(const livox_ros_driver::CustomMsg::ConstPtr &msg)
 {
+    if (slam_mode == 1 && !map_loaded)
+        return;
     mtx_buffer.lock();
     double preprocess_start_time = omp_get_wtime();
     scan_count++;
@@ -2046,6 +2076,8 @@ void livox_pcl_cbk(const livox_ros_driver::CustomMsg::ConstPtr &msg)
 
 void imu_cbk(const sensor_msgs::Imu::ConstPtr &msg_in)
 {
+    if (slam_mode == 1 && !map_loaded)
+        return;
     publish_count++;
     // cout<<"IMU got at: "<<msg_in->header.stamp.toSec()<<endl;
     sensor_msgs::Imu::Ptr msg(new sensor_msgs::Imu(*msg_in));
@@ -2109,6 +2141,8 @@ void imu_cbk(const sensor_msgs::Imu::ConstPtr &msg_in)
 
 void gnss_cbk(const sensor_msgs::NavSatFixConstPtr& msg_in)
 {
+    if (slam_mode == 1 && !map_loaded)
+        return;
     //  ROS_INFO("GNSS DATA IN ");
     double timestamp = msg_in->header.stamp.toSec();
 
@@ -3384,6 +3418,7 @@ void Set_localization()
     initializedFlag = 0;
     hand_init_state = false;
     localization_flag_vel = 0;
+    map_loaded = false;
 }
 
 /**
@@ -3711,6 +3746,7 @@ bool load_map(std::string load_dir)
     pub_slam_state.publish(state_msg);
 
     ROS_INFO("load_map completed: %d keyframes loaded from %s", loaded_count, load_dir.c_str());
+    map_loaded = true;
     return true;
 }
 
@@ -4462,20 +4498,20 @@ int main(int argc, char **argv)
 
             /*back end*/
             // mapping 模式: 保存关键帧 + 因子图优化 + 增长ikd-Tree
-            // localization 模式: 仅使用EKF跟踪，不保存关键帧、不增长地图
-            // if (slam_mode == 0)
-            // {
+            // localization 模式: 仅初始化完成后才允许建图步骤 (防止未初始化时创建锚定在原点的错误关键帧)
+            if (slam_mode == 0 || initializedFlag == 2)
+            {
                 saveKeyFramesAndFactor();
                 correctPoses();
                 t3 = omp_get_wtime();
                 map_incremental();
                 t5 = omp_get_wtime();
-            // }
-            // else
-            // {
-            //     t3 = omp_get_wtime();
-            //     t5 = omp_get_wtime();
-            // }
+            }
+            else
+            {
+                t3 = omp_get_wtime();
+                t5 = omp_get_wtime();
+            }
 
             /******* Publish odometry *******/
             publish_odometry(pubOdomAftMapped);
