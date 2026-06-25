@@ -1699,6 +1699,21 @@ void InitialPoseCallBack(const geometry_msgs::PoseWithCovarianceStamped::ConstPt
     state_point.vel.setZero();
     kf.change_x(state_point);
 
+    // 重置 EKF 协方差，确保后续 EKF 信任观测更新
+    {
+        auto P_init = kf.get_P();
+        P_init.setIdentity();
+        P_init.block<3,3>(0,0).diagonal()   = V3D(0.01, 0.01, 0.01);     // pos
+        P_init.block<3,3>(3,3).diagonal()   = V3D(0.01, 0.01, 0.01);     // rot
+        P_init.block<3,3>(6,6).diagonal()   = V3D(1e-5, 1e-5, 1e-5);     // ext rot
+        P_init.block<3,3>(9,9).diagonal()   = V3D(1e-5, 1e-5, 1e-5);     // ext trans
+        P_init.block<3,3>(12,12).diagonal() = V3D(0.01, 0.01, 0.01);     // vel
+        P_init.block<3,3>(15,15).diagonal() = V3D(0.0001, 0.0001, 0.0001); // bg
+        P_init.block<3,3>(18,18).diagonal() = V3D(0.001, 0.001, 0.001);   // ba
+        P_init.block<2,2>(21,21).diagonal() = Eigen::Vector2d(1e-5, 1e-5);  // grav (S2)
+        kf.change_P(P_init);
+    }
+
     hand_init_state = true;
     initializedFlag = 1;
 
@@ -1742,11 +1757,14 @@ bool gnssAutoInit()
     if (initializedFlag != 0) return false;
 
     // 取最近 lidar时间 ±0.5s 内的 GNSS 数据
+    // 使用 last_timestamp_lidar（回调时已更新）而非 lidar_end_time（由 sync_packages 维护）
+    // 避免在首帧回调时 lidar_end_time 仍为 0.0 导致时间匹配失败
+    double search_time = last_timestamp_lidar;
     nav_msgs::Odometry latest;
     bool found = false;
     while (!gnss_buffer.empty())
     {
-        double dt = gnss_buffer.front().header.stamp.toSec() - lidar_end_time;
+        double dt = gnss_buffer.front().header.stamp.toSec() - search_time;
         if (dt < -0.5) { gnss_buffer.pop_front(); continue; }
         if (dt > 0.5)  break;
         latest = gnss_buffer.front();
@@ -1796,6 +1814,21 @@ bool gnssAutoInit()
     state_point.rot = EulerToQuat(cloudKeyPoses6D->points[kf_idx].roll, cloudKeyPoses6D->points[kf_idx].pitch, cloudKeyPoses6D->points[kf_idx].yaw);
     state_point.vel.setZero();
     kf.change_x(state_point);
+
+    // 重置 EKF 协方差，确保初始化后 EKF 信任观测更新
+    {
+        auto P_init = kf.get_P();
+        P_init.setIdentity();
+        P_init.block<3,3>(0,0).diagonal()   = V3D(0.01, 0.01, 0.01);     // pos
+        P_init.block<3,3>(3,3).diagonal()   = V3D(0.01, 0.01, 0.01);     // rot
+        P_init.block<3,3>(6,6).diagonal()   = V3D(1e-5, 1e-5, 1e-5);     // ext rot
+        P_init.block<3,3>(9,9).diagonal()   = V3D(1e-5, 1e-5, 1e-5);     // ext trans
+        P_init.block<3,3>(12,12).diagonal() = V3D(0.01, 0.01, 0.01);     // vel
+        P_init.block<3,3>(15,15).diagonal() = V3D(0.0001, 0.0001, 0.0001); // bg
+        P_init.block<3,3>(18,18).diagonal() = V3D(0.001, 0.001, 0.001);   // ba
+        P_init.block<2,2>(21,21).diagonal() = Eigen::Vector2d(1e-5, 1e-5);  // grav (S2)
+        kf.change_P(P_init);
+    }
 
     // 发布 GNSS 初始化位置 Marker（map 系中的球体）
     {
@@ -1886,11 +1919,17 @@ void icpLocalizationInit(pcl::PointCloud<PointType>::Ptr scan_lidar_frame)
             state_point.vel.setZero();
             kf.change_x(state_point);
 
-            // 重置位置/旋转/速度协方差，确保后续 EKF 信任观测修正
+            // 重置 EKF 协方差，确保后续 EKF 信任观测修正
             auto P_init = kf.get_P();
-            P_init.block<3,3>(0,0) = Eigen::Matrix3d::Identity();   // pos (indices 0-2)
-            P_init.block<3,3>(3,3) = Eigen::Matrix3d::Identity();   // rot (indices 3-5)
-            P_init.block<3,3>(12,12) = Eigen::Matrix3d::Identity(); // vel (indices 12-14)
+            P_init.setIdentity();
+            P_init.block<3,3>(0,0).diagonal()   = V3D(0.01, 0.01, 0.01);     // pos
+            P_init.block<3,3>(3,3).diagonal()   = V3D(0.01, 0.01, 0.01);     // rot
+            P_init.block<3,3>(6,6).diagonal()   = V3D(1e-5, 1e-5, 1e-5);     // ext rot
+            P_init.block<3,3>(9,9).diagonal()   = V3D(1e-5, 1e-5, 1e-5);     // ext trans
+            P_init.block<3,3>(12,12).diagonal() = V3D(0.01, 0.01, 0.01);     // vel
+            P_init.block<3,3>(15,15).diagonal() = V3D(0.0001, 0.0001, 0.0001); // bg
+            P_init.block<3,3>(18,18).diagonal() = V3D(0.001, 0.001, 0.001);   // ba
+            P_init.block<2,2>(21,21).diagonal() = Eigen::Vector2d(1e-5, 1e-5);  // grav (S2)
             kf.change_P(P_init);
 
             initializedFlag = 2;
@@ -4478,7 +4517,17 @@ int main(int argc, char **argv)
             /*** iterated state estimation ***/
             double t_update_start = omp_get_wtime();
             double solve_H_time = 0;
-            kf.update_iterated_dyn_share_modified(LASER_POINT_COV, solve_H_time); //预测、更新
+            // localization 模式下，仅在初始化完成后才执行 EKF 测量更新
+            // 防止错误初始位姿导致 scan-to-map 匹配污染 EKF 状态
+            if (slam_mode == 0 || initializedFlag == 2)
+            {
+                kf.update_iterated_dyn_share_modified(LASER_POINT_COV, solve_H_time); //预测、更新
+            }
+            else
+            {
+                // localization 未初始化: 仅做 IMU 前向传播，跳过 scan-to-map 更新
+                solve_H_time = 0;
+            }
             state_point = kf.get_x();
             euler_cur = SO3ToEuler(state_point.rot);
             pos_lid = state_point.pos + state_point.rot * state_point.offset_T_L_I; // world系下lidar坐标
